@@ -3,97 +3,172 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>the channel</title>
+  <meta name="theme-color" content="#090b12" />
+  <meta name="description" content="A tiny, account-free WebRTC voice room." />
+  <title>the channel — voice room</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>" />
 </head>
 <body>
-  <div class="glow"></div>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <div class="noise"></div>
 
-  <header>
-    <div class="brand">
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="The channel home">
+      <span class="brand-mark" aria-hidden="true">
+        <i></i><i></i><i></i>
+      </span>
+      <span>the channel</span>
+    </a>
+    <div class="connection">
       <span class="dot" id="statusDot"></span>
-      <h1>the channel</h1>
+      <span class="status" id="status" role="status">loading WebAssembly…</span>
     </div>
-    <p class="status" id="status">connecting…</p>
   </header>
 
   <main>
-    <ul class="grid" id="grid"></ul>
-    <p class="empty" id="empty">nobody else is here yet — send someone the link.</p>
+    <section class="stage" aria-labelledby="roomTitle">
+      <div class="stage-heading">
+        <div>
+          <p class="eyebrow">Your private-by-default hangout</p>
+          <h1 id="roomTitle">One room. Zero friction.</h1>
+          <p class="intro">No accounts or lobby. Your voice travels directly to the people here.</p>
+        </div>
+        <div class="stage-meta">
+          <button class="security-pill" id="securityBtn" title="How calls are protected">
+            <span aria-hidden="true">◆</span>
+            <span>End-to-end encrypted</span>
+          </button>
+          <div class="people-count" aria-live="polite">
+            <strong id="peerCount">0</strong>
+            <span id="peerCountLabel">people here</span>
+          </div>
+        </div>
+      </div>
+
+      <ul class="grid" id="grid" aria-label="People in the channel"></ul>
+
+      <div class="empty" id="empty">
+        <span class="empty-icon" aria-hidden="true">✦</span>
+        <h2>It’s quiet in here</h2>
+        <p>Invite someone with the room link and start talking.</p>
+        <button id="emptyCopyBtn" class="text-action">Copy invitation link</button>
+      </div>
+    </section>
   </main>
 
-  <footer>
-    <button id="muteBtn" class="btn primary" title="Mute / unmute (M)">
-      <span class="ico" id="muteIco">🎙️</span><span id="muteLabel">mute</span>
+  <footer class="dock" aria-label="Call controls">
+    <button id="editBtn" class="control" title="Edit your profile">
+      <span class="control-icon" aria-hidden="true">☺</span>
+      <span>Profile</span>
     </button>
-    <button id="editBtn" class="btn" title="Change your picture and name">
-      <span class="ico">🙂</span><span>you</span>
+    <button id="muteBtn" class="control primary" title="Mute or unmute (M)">
+      <span class="control-icon" id="muteIco" aria-hidden="true">●</span>
+      <span id="muteLabel">Mute</span>
     </button>
-    <button id="copyBtn" class="btn" title="Copy the room link">
-      <span class="ico">🔗</span><span id="copyLabel">copy link</span>
+    <button id="copyBtn" class="control" title="Copy the room link">
+      <span class="control-icon" aria-hidden="true">↗</span>
+      <span id="copyLabel">Invite</span>
     </button>
-    <button id="encryptBtn" class="btn debug" title="Encrypt your outgoing audio; only listeners holding your key can hear it">
-      <span class="ico">🔒</span><span id="encryptLabel">encryption: off</span>
+    <button id="settingsBtn" class="control" title="Audio settings">
+      <span class="control-icon" aria-hidden="true">⌁</span>
+      <span>Audio</span>
     </button>
-    <button id="keyBtn" class="btn debug" title="Show your encryption key, or paste someone else's">
-      <span class="ico">🔑</span><span>keys</span>
+    <button id="scrambleBtn" class="control btn debug" title="Debug: encrypt your outgoing audio and let peers play the ciphertext">
+      <span class="control-icon ico" aria-hidden="true">🔒</span>
+      <span id="scrambleLabel">encrypt (debug)</span>
     </button>
   </footer>
 
-  <p class="debug-note" id="encryptNote" hidden>
-    your voice is encrypted — only people who paste your key hear you, everyone else gets static
+  <p class="debug-note" id="debugNote" hidden>
+    your voice is encrypted with a key nobody has — everyone else hears static, and you can't hear it yourself
   </p>
 
-  <div class="sheet" id="sheet" hidden>
-    <div class="sheet-card">
-      <h2>your picture</h2>
+  <div class="sheet" id="profileSheet" hidden>
+    <section class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="eyebrow">Local identity</p>
+          <h2 id="profileTitle">Make it yours</h2>
+        </div>
+        <button class="close-btn" id="profileCloseBtn" aria-label="Close profile editor">×</button>
+      </div>
       <div class="editor">
-        <div class="preview" id="preview"></div>
+        <div class="preview" id="preview" aria-hidden="true"></div>
         <div class="editor-controls">
+          <label for="nameInput">Display name</label>
           <input id="nameInput" maxlength="24" placeholder="name" autocomplete="off" />
           <div class="row">
-            <button class="btn small" id="rerollBtn">🎲 shuffle</button>
-            <label class="btn small" for="fileInput">🖼️ upload</label>
+            <button class="pill-btn" id="rerollBtn">Shuffle avatar</button>
+            <label class="pill-btn" for="fileInput">Upload photo</label>
             <input type="file" id="fileInput" accept="image/*" hidden />
           </div>
-          <p class="hint">no account, nothing saved on the server — this lives in your browser.</p>
         </div>
       </div>
-      <button class="btn primary wide" id="doneBtn">done</button>
-    </div>
+      <p class="hint">Your name and picture stay in this browser. Nothing is saved on the server.</p>
+      <button class="wide-action" id="doneBtn">Save profile</button>
+    </section>
   </div>
 
-  <div class="sheet" id="keySheet" hidden>
-    <div class="sheet-card wide-card">
-      <h2>your encryption key</h2>
-      <p class="hint tight">
-        anyone you give this to can hear you while encryption is on. it never leaves your browser
-        unless you copy it out.
+  <div class="sheet" id="settingsSheet" hidden>
+    <section class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="eyebrow">Call setup</p>
+          <h2 id="settingsTitle">Audio settings</h2>
+        </div>
+        <button class="close-btn" id="settingsCloseBtn" aria-label="Close audio settings">×</button>
+      </div>
+      <label class="field-label" for="micSelect">Microphone</label>
+      <select id="micSelect">
+        <option value="">System default</option>
+      </select>
+      <label class="switch-row" for="pttToggle">
+        <span>
+          <strong>Push to talk</strong>
+          <small>Hold Space or the mic button while speaking</small>
+        </span>
+        <span class="switch">
+          <input id="pttToggle" type="checkbox" />
+          <i aria-hidden="true"></i>
+        </span>
+      </label>
+      <p class="settings-note" id="settingsNote" role="status"></p>
+      <button class="wide-action" id="settingsDoneBtn">Done</button>
+    </section>
+  </div>
+
+  <div class="sheet" id="securitySheet" hidden>
+    <section class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="securityTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="eyebrow">Call protection</p>
+          <h2 id="securityTitle">End-to-end encrypted</h2>
+        </div>
+        <button class="close-btn" id="securityCloseBtn" aria-label="Close security details">×</button>
+      </div>
+      <div class="security-hero" aria-hidden="true">◆</div>
+      <p class="security-copy">
+        Every voice connection is encrypted directly between browsers with DTLS-SRTP. The server
+        relays connection setup messages, but it never receives an audio stream or the encryption
+        keys.
       </p>
-      <textarea id="myKey" class="keybox" readonly spellcheck="false"></textarea>
-      <div class="row">
-        <button class="btn small" id="copyKeyBtn">📋 <span id="copyKeyLabel">copy key</span></button>
-        <button class="btn small" id="newKeyBtn">♻️ new key</button>
-        <span class="print">fingerprint <code id="myKeyPrint">…</code></span>
+      <div class="security-detail">
+        <strong>Verify who you reached</strong>
+        <p>
+          Once connected, each person’s card shows a safety code derived from both WebRTC
+          certificates. Compare it with them using another trusted channel. Matching codes rule out
+          a signaling-layer interception.
+        </p>
       </div>
-
-      <h2 class="spaced">hear someone encrypted</h2>
-      <p class="hint tight">paste the key they sent you, then press listen.</p>
-      <textarea id="listenInput" class="keybox" spellcheck="false" placeholder="paste an RSA private key here"></textarea>
-      <div class="row">
-        <button class="btn small" id="listenBtn">🔓 listen</button>
-        <button class="btn small" id="clearListenBtn">✕ clear</button>
-      </div>
-      <p class="key-status" id="keyStatus"></p>
-
-      <button class="btn primary wide" id="keyDoneBtn">done</button>
-    </div>
+      <button class="wide-action" id="securityDoneBtn">Got it</button>
+    </section>
   </div>
 
-  <button class="unblock" id="unblock" hidden>tap to enable audio</button>
-
+  <button class="unblock" id="unblock" hidden>Tap to enable audio</button>
   <div id="audio" aria-hidden="true"></div>
-  <script src="app.js" type="module"></script>
+
+  <script src="boot.js" type="module"></script>
 </body>
 </html>

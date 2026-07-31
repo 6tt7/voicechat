@@ -3,7 +3,7 @@ services:
     name: voicechat
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     envVars:
       - key: MAX_PEERS

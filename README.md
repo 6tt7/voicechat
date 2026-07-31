@@ -1,56 +1,111 @@
 # the channel
 
-One voice room. No accounts, no logins, no lobby — you open the page, your mic connects, you're in.
-Identity is just a profile picture and a name kept in your own browser.
+A single, account-free WebRTC voice room with a C++/WebAssembly browser client.
+
+Open the page, allow microphone access, and you are in. Your profile is kept in your own browser,
+audio travels directly between participants, and the server only relays the small messages needed
+to establish each peer-to-peer connection.
+
+## What is included
+
+- C++20 application logic compiled to WebAssembly
+- direct peer-to-peer WebRTC audio
+- mandatory DTLS-SRTP media encryption with pairwise safety codes
+- responsive desktop and mobile interface
+- local emoji, color, or uploaded-photo profiles
+- selectable microphone input
+- optional hold-Space push to talk
+- per-participant volume controls
+- speaking and muted indicators
+- reconnect handling and a capped full-mesh room
+- automated signaling, capacity, sanitization, and static-asset tests
 
 ## Run it
 
+The generated WebAssembly artifacts are committed, so running the app only requires Node.js 18 or
+newer:
+
 ```bash
-npm install
+npm ci
 npm start
 ```
 
-Open http://localhost:3000. Anyone who opens the same URL lands in the same (and only) channel.
-
-## How it works
-
-- **Audio is peer-to-peer.** Every participant opens a direct WebRTC connection to every other
-  participant (a full mesh). Voice never passes through the server.
-- **The server only does signaling.** `server.js` keeps an in-memory list of who is in the room and
-  relays SDP/ICE between them over WebSocket. Nothing is written to disk, and there is no database.
-- **Profiles are browser-local.** Your emoji/color avatar (or an uploaded picture, downscaled to a
-  192px square) and name live in `localStorage` and are sent to peers only while you're connected.
-
-Because it's a mesh, bandwidth grows with the square of the room size. `MAX_PEERS` (default 12)
-caps it; past that, new arrivals are told the channel is full.
+Open <http://localhost:3000>. Anyone opening the same URL joins the same room.
 
 ```bash
 PORT=8080 MAX_PEERS=6 npm start
 ```
 
-## Using it over the internet
+## Build the WebAssembly client
 
-Browsers only grant microphone access on `localhost` or over **HTTPS**, so deploy behind TLS
-(Render, Fly.io, a Caddy/nginx reverse proxy — anything terminating HTTPS works; the WebSocket
-upgrade rides the same port).
+Install and activate [Emscripten](https://emscripten.org/docs/getting_started/downloads.html), then:
 
-Only Google's public STUN servers are configured. That covers most home networks, but peers behind
-symmetric NAT or strict corporate firewalls will fail to connect without a TURN relay. To add one,
-extend `iceServers` at the top of [public/app.js](public/app.js):
-
-```js
-{ urls: 'turn:your-turn-host:3478', username: 'user', credential: 'pass' }
+```bash
+npm run build:wasm
 ```
+
+This compiles [`src/client.cpp`](src/client.cpp) into:
+
+- `public/voicechat-runtime.wasm` — the native WebAssembly module
+- `public/voicechat-runtime.js` — generated Emscripten bindings
+
+`public/boot.js` loads the module and bridges the owner's encoded-audio debug cipher into C++.
+WebRTC, media devices, Web Audio, local storage, and the DOM are browser APIs, so the C++ module
+reaches them through Emscripten's generated JavaScript bindings. The owner's `cipher.js`,
+`cipher-worker.js`, and `voice-cipher.js` modules remain hand-written JavaScript because the
+standard encoded-transform API runs in a browser worker.
+
+The checked-in artifacts are built and reproducibility-checked in CI with Emscripten 6.0.5.
+
+## Test it
+
+```bash
+npm run check
+```
+
+The check runs Node syntax validation and the integration suite. CI also recompiles the C++ source
+and fails if the committed `.js` or `.wasm` output is stale.
+
+## Architecture
+
+The browser client is C++/WebAssembly. It owns profiles, DOM rendering, call controls, media-device
+switching, speaking meters, signaling state, reconnects, and the WebRTC peer mesh.
+
+`server.js` serves the static client and hosts one WebSocket channel. It assigns participant IDs,
+sanitizes public profiles, maintains the in-memory roster, enforces `MAX_PEERS`, and relays SDP/ICE.
+It never receives voice audio and writes nothing to disk.
+
+WebRTC encrypts each media path with DTLS-SRTP, including when packets travel through a TURN relay.
+After a peer connects, the client reads both certificate fingerprints from the WebRTC statistics
+report, sorts them into the same order on both ends, hashes them with SHA-256, and displays the first
+48 bits as a safety code. Participants can compare that code over another trusted channel to detect
+a signaling-layer man-in-the-middle.
+
+Because the room is a full mesh, each participant connects directly to every other participant and
+bandwidth grows quickly with room size. The default limit is 12.
+
+## Deploy it
+
+Microphone access requires `localhost` or HTTPS. Deploy behind TLS on Render, Fly.io, Caddy, nginx,
+or another HTTPS host; the WebSocket upgrade uses the same port.
+
+The client includes public Google STUN servers. Peers behind symmetric NAT or strict corporate
+firewalls may still require a TURN relay. Add TURN credentials to `rtcConfiguration()` in
+`src/client.cpp`, rebuild the WebAssembly artifacts, and redeploy.
 
 ## Controls
 
-| | |
+| Control | Action |
 |---|---|
-| **mute** | toggle your mic (or press `M`) |
-| **you** | change your picture — shuffle an emoji avatar or upload an image |
-| **copy link** | grab the room URL to send to someone |
+| **Mute** | Toggle the microphone, or press `M` |
+| **Push to talk** | Enable it under Audio, then hold `Space` or the mic button |
+| **Profile** | Change your local display name and avatar |
+| **Invite** | Copy the room URL |
+| **Audio** | Select a microphone and push-to-talk mode |
+| **Volume** | Adjust an individual remote participant on their card |
+| **Encrypt (debug)** | Encrypt outgoing frames with an unshared key so peers hear static |
 
-A green ring around an avatar means that person is talking.
+A green pulse around a participant means they are speaking.
 
 ## Encryption
 
