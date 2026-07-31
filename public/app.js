@@ -1,3 +1,5 @@
+import { cipherSupported, installSenderCipher, pcCipherOptions, setCipherEnabled } from './cipher.js';
+
 const ICE = {
   iceServers: [
     { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
@@ -17,6 +19,7 @@ let ws = null;
 let myId = null;
 let localStream = null;
 let muted = false;
+let scrambled = false;
 let reconnectDelay = 1000;
 let audioBlocked = false;
 
@@ -95,6 +98,7 @@ function renderPeer(id) {
   paintAvatar(card.querySelector('.avatar'), entry.profile);
   card.querySelector('.name').textContent = entry.profile.name;
   card.classList.toggle('muted', !!entry.muted);
+  card.classList.toggle('scrambled', !!entry.scrambled);
   $('empty').hidden = peers.size > 1;
 }
 
@@ -180,10 +184,12 @@ function signal(to, data) {
 }
 
 function connectTo(id, peer, initiator) {
-  const pc = new RTCPeerConnection(ICE);
+  const pc = new RTCPeerConnection({ ...ICE, ...pcCipherOptions() });
   peers.set(id, { ...peer, pc, pending: [] });
 
-  for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+  for (const track of localStream.getTracks()) {
+    installSenderCipher(pc.addTrack(track, localStream));
+  }
 
   pc.onicecandidate = (e) => {
     if (e.candidate) signal(id, { candidate: e.candidate });
@@ -256,7 +262,7 @@ function connect() {
 
   ws.onopen = () => {
     reconnectDelay = 1000;
-    ws.send(JSON.stringify({ type: 'join', profile, muted }));
+    ws.send(JSON.stringify({ type: 'join', profile, muted, scrambled }));
   };
 
   ws.onmessage = async (e) => {
@@ -264,7 +270,7 @@ function connect() {
     switch (msg.type) {
       case 'welcome': {
         myId = msg.id;
-        peers.set(myId, { profile, muted });
+        peers.set(myId, { profile, muted, scrambled });
         renderPeer(myId);
         watchSpeaking(myId, localStream);
         setStatus(msg.peers.length ? 'connected' : 'connected — waiting for others', 'live');
@@ -285,6 +291,7 @@ function connect() {
         if (entry) {
           entry.profile = msg.peer.profile;
           entry.muted = msg.peer.muted;
+          entry.scrambled = msg.peer.scrambled;
           renderPeer(msg.peer.id);
         }
         break;
@@ -310,12 +317,13 @@ function connect() {
 
 function pushUpdate() {
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'update', profile, muted }));
+    ws.send(JSON.stringify({ type: 'update', profile, muted, scrambled }));
   }
   const me = peers.get(myId);
   if (me) {
     me.profile = profile;
     me.muted = muted;
+    me.scrambled = scrambled;
     renderPeer(myId);
   }
 }
@@ -345,6 +353,24 @@ $('unblock').onclick = async () => {
 };
 
 $('muteBtn').onclick = () => setMuted(!muted);
+
+/* Debug: encrypt outgoing audio with a key nobody else has, so peers decode the
+   raw ciphertext as static. Off by default; nothing here is a privacy feature. */
+function setScrambled(next) {
+  scrambled = next;
+  setCipherEnabled(scrambled);
+  $('scrambleBtn').classList.toggle('on', scrambled);
+  $('scrambleLabel').textContent = scrambled ? 'encrypted: on' : 'encrypt (debug)';
+  $('debugNote').hidden = !scrambled;
+  pushUpdate();
+}
+
+if (!cipherSupported) {
+  $('scrambleBtn').disabled = true;
+  $('scrambleBtn').title = 'This browser has no encoded-transform support';
+}
+
+$('scrambleBtn').onclick = () => setScrambled(!scrambled);
 
 document.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'm' && !$('sheet').contains(document.activeElement)) {

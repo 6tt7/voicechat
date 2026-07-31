@@ -33,7 +33,7 @@ function broadcast(msg, exceptId) {
 
 function publicPeer(id) {
   const peer = peers.get(id);
-  return { id, profile: peer.profile, muted: peer.muted };
+  return { id, profile: peer.profile, muted: peer.muted, scrambled: peer.scrambled };
 }
 
 function sanitizeProfile(profile) {
@@ -71,7 +71,12 @@ wss.on('connection', (ws) => {
           return;
         }
         joined = true;
-        peers.set(id, { ws, profile: sanitizeProfile(msg.profile), muted: !!msg.muted });
+        peers.set(id, {
+          ws,
+          profile: sanitizeProfile(msg.profile),
+          muted: !!msg.muted,
+          scrambled: !!msg.scrambled,
+        });
         // The newcomer gets the roster and is the one who dials everyone already here.
         send(ws, {
           type: 'welcome',
@@ -94,6 +99,7 @@ wss.on('connection', (ws) => {
         const peer = peers.get(id);
         if (msg.profile) peer.profile = sanitizeProfile(msg.profile);
         if (typeof msg.muted === 'boolean') peer.muted = msg.muted;
+        if (typeof msg.scrambled === 'boolean') peer.scrambled = msg.scrambled;
         broadcast({ type: 'peer-update', peer: publicPeer(id) }, id);
         break;
       }

@@ -51,3 +51,24 @@ extend `iceServers` at the top of [public/app.js](public/app.js):
 | **copy link** | grab the room URL to send to someone |
 
 A green ring around an avatar means that person is talking.
+
+## The encrypt (debug) button
+
+Off by default. Turn it on and your outgoing audio frames are encrypted with AES-CTR using a key
+generated in your tab that is never shared — so **no peer can decrypt it, by design**. Receivers feed
+the raw ciphertext straight into their Opus decoder, which comes out as loud static. Everyone in the
+room sees a 🔒 badge on your avatar while it's on.
+
+You can't hear the effect yourself; your own mic is never played back locally. Open a second tab or
+have someone else listen.
+
+The one-byte Opus TOC header is left in the clear ([public/voice-cipher.js](public/voice-cipher.js)).
+That's deliberate: encrypt it too and the far-end decoder rejects the frames outright, so you get
+silence and decoder errors instead of anything audible. Frames run through
+[`RTCRtpScriptTransform`](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpScriptTransform) in a
+worker, falling back to Chrome's older `createEncodedStreams`; browsers with neither get the button
+disabled.
+
+This is a debug toy for hearing what undecrypted audio sounds like — not a privacy feature. Real
+end-to-end encryption needs the receiving side to hold the key and decrypt, which is the opposite of
+what this button does.

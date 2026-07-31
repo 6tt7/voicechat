@@ -33,7 +33,14 @@
     <button id="copyBtn" class="btn" title="Copy the room link">
       <span class="ico">🔗</span><span id="copyLabel">copy link</span>
     </button>
+    <button id="scrambleBtn" class="btn debug" title="Debug: encrypt your outgoing audio and let peers play the ciphertext">
+      <span class="ico">🔒</span><span id="scrambleLabel">encrypt (debug)</span>
+    </button>
   </footer>
+
+  <p class="debug-note" id="debugNote" hidden>
+    your voice is encrypted with a key nobody has — everyone else hears static, and you can't hear it yourself
+  </p>
 
   <div class="sheet" id="sheet" hidden>
     <div class="sheet-card">
