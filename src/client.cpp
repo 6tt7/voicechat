@@ -181,25 +181,6 @@ void loadSettings() {
   muted = pushToTalk;
 }
 
-std::string shade(const std::string& hex, int amount) {
-  if (hex.size() != 7 || hex.front() != '#') return "#30384d";
-  const int packed = std::strtol(hex.c_str() + 1, nullptr, 16);
-  auto channel = [amount](int value) {
-    return std::clamp(value + amount, 0, 255);
-  };
-  const int red = channel((packed >> 16) & 255);
-  const int green = channel((packed >> 8) & 255);
-  const int blue = channel(packed & 255);
-  const char digits[] = "0123456789abcdef";
-  std::string result = "#000000";
-  const int values[] = { red, green, blue };
-  for (int i = 0; i < 3; ++i) {
-    result[1 + i * 2] = digits[(values[i] >> 4) & 15];
-    result[2 + i * 2] = digits[values[i] & 15];
-  }
-  return result;
-}
-
 void paintAvatar(val element, const Profile& source) {
   val style = element["style"];
   if (!source.avatar.empty()) {
@@ -208,10 +189,8 @@ void paintAvatar(val element, const Profile& source) {
     style.set("backgroundColor", js("transparent"));
     element.set("textContent", std::string());
   } else {
-    style.set(
-      "backgroundImage",
-      "linear-gradient(145deg, " + source.color + ", " + shade(source.color, -42) + ")"
-    );
+    style.set("backgroundImage", js("none"));
+    style.set("backgroundColor", source.color);
     element.set("textContent", source.emoji.empty() ? js("🙂") : source.emoji);
   }
 }
@@ -219,7 +198,7 @@ void paintAvatar(val element, const Profile& source) {
 void updateRoomCount() {
   const int count = static_cast<int>(peers.size());
   byId("peerCount").set("textContent", std::to_string(count));
-  byId("peerCountLabel").set("textContent", count == 1 ? js("person here") : js("people here"));
+  byId("peerCountLabel").set("textContent", js("connected"));
   byId("empty").set("hidden", count > 1);
 }
 

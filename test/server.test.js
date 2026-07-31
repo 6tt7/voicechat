@@ -85,7 +85,8 @@ test('serves the WebAssembly client and redesigned shell', async (t) => {
   assert.match(page.headers.get('content-security-policy'), /script-src 'self' 'wasm-unsafe-eval'/);
   assert.match(page.headers.get('content-security-policy'), /worker-src 'self'/);
   const html = await page.text();
-  assert.match(html, /One room\. Zero friction\./);
+  assert.match(html, /one room/);
+  assert.match(html, /Voice only\. Peer to peer\. No account\./);
   assert.match(html, /boot\.js/);
 
   const wasm = await fetch(`${voiceChat.httpUrl}/voicechat-runtime.wasm`);
