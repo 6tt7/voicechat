@@ -99,3 +99,50 @@ Two details that are load-bearing, both in [public/voice-cipher.js](public/voice
   the caller, right after `setRemoteDescription` for the answerer. Attaching it in `ontrack` (the
   obvious place) is too late: Chrome routes no frames through it, and audio stays encrypted while
   the UI claims otherwise.
+
+## Diffie-Hellman encryption (replaces the copy-paste keys)
+
+Every peer link now runs an **ephemeral ECDH (P-256) handshake**: the two sides
+exchange public keys over the signaling channel and each derives the same
+AES-GCM key via HKDF. The server only relays public keys and can never compute
+the secret. Ephemeral-per-link means past audio stays private even if a key
+later leaks (forward secrecy), and nobody copies a key by hand. Each peer card
+shows a 🔒 and a shared-key fingerprint — read it aloud to confirm a link.
+On by default; the encryption button toggles the app layer (WebRTC's DTLS-SRTP
+still encrypts transport underneath regardless).
+
+## Console (debug logs)
+
+The **console** button opens a categorized log — system, signaling, webrtc,
+key exchange, media, admin — with filter chips. The Diffie-Hellman handshake
+for every peer (with fingerprints) shows up under "key exchange".
+
+## Admin
+
+Login is **server-side only** (see `server.js`): passwords are stored as
+`salt:scryptHash`, compared in constant time, and rate-limited to 6 tries per
+minute per IP. Override the accounts in production with the `ADMIN_ACCOUNTS`
+env var (JSON). Admins appear on a raised **stage** with a crown and an animated
+RGB name. The admin panel + tapping a person gives: kick, ban IP, warn,
+announce (types out live to everyone), rename, reset avatar, force-mute, room
+lock, spotlight, and confetti. Every listener also has a local per-person
+volume slider (how loudly *they* hear someone). Themes: dark / light / midnight.
+
+### Not built (and why)
+
+Some items from the request were left out because they target or harm people
+who never consented:
+
+- **Full-screen strobe + high-pitch tone** — flashing and loud high-frequency
+  audio are seizure and hearing-damage risks. Omitted entirely.
+- **Spawn an image on someone's screen** and **forward a user to a website** —
+  injecting content into or navigating another person's browser is harassment /
+  phishing. Omitted; admins can *reset* an inappropriate avatar instead.
+- **Force another user's volume up/down** — remotely controlling someone's
+  playback is a harm vector. Replaced with a local slider each person controls
+  for themselves.
+- **Hidden admin-only features** — nothing is concealed; both admin logins live
+  in `server.js` (as hashes) and are documented here.
+
+Note: `mfa123` is a weak password. Set a strong one via `ADMIN_ACCOUNTS` before
+this is public-facing.

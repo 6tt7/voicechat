@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -19,9 +19,12 @@
   </header>
 
   <main>
+    <ul class="stage" id="stage"></ul>
     <ul class="grid" id="grid"></ul>
     <p class="empty" id="empty">nobody else is here yet — send someone the link.</p>
   </main>
+
+  <p class="announce" id="announce" hidden></p>
 
   <footer>
     <button id="muteBtn" class="btn primary" title="Mute / unmute (M)">
@@ -33,18 +36,18 @@
     <button id="copyBtn" class="btn" title="Copy the room link">
       <span class="ico">🔗</span><span id="copyLabel">copy link</span>
     </button>
-    <button id="encryptBtn" class="btn debug" title="Encrypt your outgoing audio; only listeners holding your key can hear it">
-      <span class="ico">🔒</span><span id="encryptLabel">encryption: off</span>
+    <button id="encryptBtn" class="btn debug" title="Diffie-Hellman audio encryption (per-link, forward secret)">
+      <span class="ico">🔒</span><span id="encryptLabel">encryption: on</span>
     </button>
-    <button id="keyBtn" class="btn debug" title="Show your encryption key, or paste someone else's">
-      <span class="ico">🔑</span><span>keys</span>
+    <button id="consoleBtn" class="btn debug" title="Open debug logs">
+      <span class="ico">🖥️</span><span>console</span>
+    </button>
+    <button id="adminBtn" class="btn debug" title="Admin login">
+      <span class="ico">🛡️</span><span id="adminBtnLabel">admin</span>
     </button>
   </footer>
 
-  <p class="debug-note" id="encryptNote" hidden>
-    your voice is encrypted — only people who paste your key hear you, everyone else gets static
-  </p>
-
+  <!-- profile editor -->
   <div class="sheet" id="sheet" hidden>
     <div class="sheet-card">
       <h2>your picture</h2>
@@ -64,35 +67,97 @@
     </div>
   </div>
 
-  <div class="sheet" id="keySheet" hidden>
+  <!-- console / debug logs -->
+  <div class="sheet" id="console" hidden>
     <div class="sheet-card wide-card">
-      <h2>your encryption key</h2>
-      <p class="hint tight">
-        anyone you give this to can hear you while encryption is on. it never leaves your browser
-        unless you copy it out.
-      </p>
-      <textarea id="myKey" class="keybox" readonly spellcheck="false"></textarea>
-      <div class="row">
-        <button class="btn small" id="copyKeyBtn">📋 <span id="copyKeyLabel">copy key</span></button>
-        <button class="btn small" id="newKeyBtn">♻️ new key</button>
-        <span class="print">fingerprint <code id="myKeyPrint">…</code></span>
+      <div class="console-head">
+        <h2>console</h2>
+        <label class="theme">theme
+          <select id="themeSelect">
+            <option value="dark">dark</option>
+            <option value="light">light</option>
+            <option value="midnight">midnight</option>
+          </select>
+        </label>
       </div>
-
-      <h2 class="spaced">hear someone encrypted</h2>
-      <p class="hint tight">paste the key they sent you, then press listen.</p>
-      <textarea id="listenInput" class="keybox" spellcheck="false" placeholder="paste an RSA private key here"></textarea>
+      <div class="chips" id="logChips"></div>
+      <div class="logbox" id="logList"></div>
       <div class="row">
-        <button class="btn small" id="listenBtn">🔓 listen</button>
-        <button class="btn small" id="clearListenBtn">✕ clear</button>
+        <button class="btn small" id="logClear">🧹 clear</button>
+        <button class="btn primary small wide" id="consoleDone">done</button>
       </div>
-      <p class="key-status" id="keyStatus"></p>
-
-      <button class="btn primary wide" id="keyDoneBtn">done</button>
     </div>
   </div>
 
-  <button class="unblock" id="unblock" hidden>tap to enable audio</button>
+  <!-- admin login -->
+  <div class="sheet" id="adminSheet" hidden>
+    <div class="sheet-card">
+      <h2>admin login</h2>
+      <p class="hint tight">only admin accounts can sign in. this is the only login the app has.</p>
+      <input id="adminUser" placeholder="username" autocomplete="off" spellcheck="false" />
+      <input id="adminPass" type="password" placeholder="password" autocomplete="off" />
+      <p class="key-status" id="adminLoginMsg"></p>
+      <div class="row">
+        <button class="btn primary small" id="adminLoginBtn">sign in</button>
+        <button class="btn small" id="adminLoginDone">cancel</button>
+      </div>
+    </div>
+  </div>
 
+  <!-- admin control panel -->
+  <div class="admin-panel" id="adminPanel" hidden>
+    <div class="admin-head">
+      <span>🛡️ admin · <b id="adminWho"></b></span>
+      <button class="x" id="adminPanelClose">✕</button>
+    </div>
+    <p class="hint tight">tap any person to moderate them. room-wide tools:</p>
+    <div class="row">
+      <input id="announceInput" placeholder="announce to everyone…" maxlength="200" />
+      <button class="btn small" id="announceBtn">📢 send</button>
+    </div>
+    <div class="row wrap">
+      <button class="btn small" id="confettiBtn">🎉 confetti</button>
+      <button class="btn small" id="lockBtn">🔒 lock room</button>
+      <button class="btn small" id="spotlightClearBtn">🔦 clear spotlight</button>
+    </div>
+  </div>
+
+  <!-- per-peer popover: local volume + admin actions -->
+  <div class="sheet" id="popover" hidden>
+    <div class="sheet-card pop">
+      <div class="pop-head">
+        <b id="popTitle">user</b>
+        <button class="x" id="popClose">✕</button>
+      </div>
+      <p class="pop-fpr" id="popFpr"></p>
+      <label class="vol" id="popVolume-wrap">how loud you hear them
+        <input type="range" id="popVolume" min="0" max="100" value="100" />
+      </label>
+      <div class="admin-actions" id="popAdmin" hidden>
+        <button class="btn small" data-action="warn">⚠️ warn</button>
+        <button class="btn small" data-action="mute">🔇 mute</button>
+        <button class="btn small" data-action="rename">✏️ rename</button>
+        <button class="btn small" data-action="reset-avatar">🖼️ reset pic</button>
+        <button class="btn small" data-action="spotlight">🔦 spotlight</button>
+        <button class="btn small danger" data-action="kick">👢 kick</button>
+        <button class="btn small danger" data-action="ban">⛔ ban IP</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- admin warning to this user -->
+  <div class="sheet" id="warnModal" hidden>
+    <div class="sheet-card">
+      <h2>⚠️ warning from <span id="warnBy"></span></h2>
+      <p class="warn-body" id="warnText"></p>
+      <button class="btn primary wide" id="warnClose">ok</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <div class="confetti" id="confetti" aria-hidden="true"></div>
+
+  <button class="unblock" id="unblock" hidden>tap to enable audio</button>
   <div id="audio" aria-hidden="true"></div>
   <script src="app.js" type="module"></script>
 </body>

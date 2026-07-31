@@ -5,17 +5,11 @@ import {
   installSenderCipher,
   pcCipherOptions,
   setEncryptionEnabled,
-  setReceiveKey,
-  setSendKey,
+  setPeerKey,
 } from './cipher.js';
-import {
-  fingerprint,
-  loadIdentity,
-  newIdentity,
-  openSessionKey,
-  sealSessionKey,
-  validatePrivateKey,
-} from './keys.js';
+import { makeEphemeralKeys, deriveSharedKey } from './crypto-dh.js';
+import { log, getEntries, onLog, clearLog, CATEGORIES } from './logbook.js';
+import { initAdmin, onServerMessage as adminServerMessage, isAdmin, adminName } from './admin.js';
 
 const ICE = {
   iceServers: [
@@ -30,53 +24,53 @@ const NOUNS = ['comet', 'moth', 'pixel', 'ember', 'echo', 'tuba', 'wren', 'onion
 
 const $ = (id) => document.getElementById(id);
 const grid = $('grid');
+const stage = $('stage');
 const audioBin = $('audio');
 
 let ws = null;
 let myId = null;
 let localStream = null;
 let muted = false;
-let encrypting = false;
+let encrypting = true; // app-layer DH encryption on by default
 let reconnectDelay = 1000;
-
-/** Our RSA identity, the AES key it protects, and the envelope peers receive. */
-let identity = null;
-let sessionKeyRaw = null;
-let sessionEnvelope = null;
-/** The private key we were given to listen with, if any. */
-let listenKey = localStorage.getItem('vc-listen-key') || '';
 let audioBlocked = false;
+let ejected = false; // kicked/banned: stop auto-reconnecting
 
-/** id -> { pc, profile, muted, card, stream, meter } */
+/** id -> peer record */
 const peers = new Map();
+/** DH pubkeys that arrived before we had a link record for the sender. */
+const pendingDh = new Map();
+
+/* ---------- theme ---------- */
+
+function applyTheme(name) {
+  const theme = ['dark', 'light', 'midnight'].includes(name) ? name : 'dark';
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('vc-theme', theme); } catch { /* not persisted */ }
+  if ($('themeSelect')) $('themeSelect').value = theme;
+}
+applyTheme(localStorage.getItem('vc-theme') || 'dark');
 
 /* ---------- profile (browser-local, no account) ---------- */
 
-function randomProfile() {
-  return {
-    name: `${pick(ADJECTIVES)}-${pick(NOUNS)}`,
-    emoji: pick(EMOJI),
-    color: pick(COLORS),
-    avatar: null,
-  };
-}
-
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+function randomProfile() {
+  return { name: `${pick(ADJECTIVES)}-${pick(NOUNS)}`, emoji: pick(EMOJI), color: pick(COLORS), avatar: null };
+}
 
 function loadProfile() {
   try {
     const saved = JSON.parse(localStorage.getItem('vc-profile'));
     if (saved && saved.name) return { avatar: null, ...saved };
-  } catch { /* fall through to a fresh identity */ }
+  } catch { /* fresh identity */ }
   const fresh = randomProfile();
   saveProfile(fresh);
   return fresh;
 }
 
 function saveProfile(p) {
-  try {
-    localStorage.setItem('vc-profile', JSON.stringify(p));
-  } catch { /* private mode: identity just lasts for this tab */ }
+  try { localStorage.setItem('vc-profile', JSON.stringify(p)); } catch { /* ephemeral */ }
 }
 
 let profile = loadProfile();
@@ -101,16 +95,14 @@ function shade(hex, amt) {
 }
 
 function cardFor(id) {
-  let entry = peers.get(id);
+  const entry = peers.get(id);
   if (!entry.card) {
     const li = document.createElement('li');
     li.className = 'peer';
-    li.innerHTML = '<div class="avatar"></div><div class="name"></div>';
+    li.innerHTML = '<div class="avatar"></div><div class="name"></div><div class="sub"></div>';
     if (id === myId) li.classList.add('me');
+    li.onclick = () => openPopover(id);
     entry.card = li;
-    // Keep yourself first in the grid so the room reads consistently.
-    if (id === myId) grid.prepend(li);
-    else grid.append(li);
   }
   return entry.card;
 }
@@ -119,11 +111,27 @@ function renderPeer(id) {
   const entry = peers.get(id);
   if (!entry) return;
   const card = cardFor(id);
+
+  // Admins sit up on the stage; everyone else in the grid.
+  const container = entry.admin ? stage : grid;
+  if (card.parentElement !== container) {
+    if (id === myId) container.prepend(card); else container.append(card);
+  }
+
   paintAvatar(card.querySelector('.avatar'), entry.profile);
-  card.querySelector('.name').textContent = entry.profile.name;
-  card.classList.toggle('muted', !!entry.muted);
-  card.classList.toggle('encrypted', !!entry.encrypted);
-  card.classList.toggle('unlocked', !!entry.encrypted && !!entry.decrypting);
+  card.querySelector('.name').textContent = entry.admin && entry.adminName ? entry.adminName : entry.profile.name;
+  card.querySelector('.sub').textContent = entry.secured ? `🔒 ${entry.fpr || ''}`.trim() : '';
+
+  card.classList.toggle('muted', !!entry.muted || !!entry.forcedMuted);
+  card.classList.toggle('admin', !!entry.admin);
+  card.classList.toggle('spotlight', !!entry.spotlight);
+  card.classList.toggle('secured', !!entry.secured);
+
+  // Force-mute: honest clients stop playing this person locally.
+  if (entry.audioEl) entry.audioEl.muted = !!entry.forcedMuted;
+  if (id === myId && entry.forcedMuted) applyForcedMuteToSelf();
+
+  stage.classList.toggle('active', stage.children.length > 0);
   $('empty').hidden = peers.size > 1;
 }
 
@@ -135,7 +143,9 @@ function removePeer(id) {
   entry.audioEl?.remove();
   entry.card?.remove();
   forgetPeer(id);
+  pendingDh.delete(id);
   peers.delete(id);
+  stage.classList.toggle('active', stage.children.length > 0);
   $('empty').hidden = peers.size > 1;
 }
 
@@ -150,7 +160,6 @@ let audioCtx = null;
 
 function ensureAudioCtx() {
   audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
-  // Autoplay policy can hand back a suspended context; without this the analysers read silence.
   if (audioCtx.state === 'suspended') {
     audioCtx.resume().catch(() => showUnblock());
     if (audioCtx.state === 'suspended') showUnblock();
@@ -171,10 +180,7 @@ function meterFor(stream, onSpeaking) {
   const tick = () => {
     analyser.getByteTimeDomainData(buf);
     let sum = 0;
-    for (const v of buf) {
-      const x = (v - 128) / 128;
-      sum += x * x;
-    }
+    for (const v of buf) { const x = (v - 128) / 128; sum += x * x; }
     const rms = Math.sqrt(sum / buf.length);
     if (rms > 0.045) {
       quietFrames = 0;
@@ -183,46 +189,36 @@ function meterFor(stream, onSpeaking) {
       onSpeaking((speaking = false));
     }
   };
-  // A timer rather than rAF: rAF stops in background tabs and would freeze the indicator.
   const timer = setInterval(tick, 60);
-
-  return {
-    stop() {
-      clearInterval(timer);
-      try { source.disconnect(); } catch { /* already torn down */ }
-    },
-  };
+  return { stop() { clearInterval(timer); try { source.disconnect(); } catch { /* torn down */ } } };
 }
 
 function watchSpeaking(id, stream) {
   const entry = peers.get(id);
   entry.meter?.stop();
   entry.meter = meterFor(stream, (on) => {
-    const card = peers.get(id)?.card;
-    if (card) card.classList.toggle('speaking', on && !peers.get(id).muted);
+    const e = peers.get(id);
+    if (e?.card) e.card.classList.toggle('speaking', on && !e.muted && !e.forcedMuted);
   });
 }
 
-/* ---------- WebRTC mesh ---------- */
+/* ---------- WebRTC mesh + Diffie-Hellman per link ---------- */
 
 function signal(to, data) {
   ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'signal', to, data }));
 }
 
-function connectTo(id, peer, initiator) {
+async function connectTo(id, peer, initiator) {
   const pc = new RTCPeerConnection({ ...ICE, ...pcCipherOptions() });
-  peers.set(id, { ...peer, pc, pending: [] });
+  peers.set(id, { ...peer, pc, pending: [], dh: null, secured: false, volume: 1 });
+  log('webrtc', `${initiator ? 'dialing' : 'answering'} ${peer.profile?.name || id.slice(0, 6)}`);
 
   for (const track of localStream.getTracks()) {
-    installSenderCipher(pc.addTrack(track, localStream));
+    installSenderCipher(pc.addTrack(track, localStream), id);
   }
-  // A decrypt transform attached in ontrack is too late — Chrome never routes
-  // frames through it. Attach as soon as the transceiver exists instead.
   attachReceiveCiphers(pc, id);
 
-  pc.onicecandidate = (e) => {
-    if (e.candidate) signal(id, { candidate: e.candidate });
-  };
+  pc.onicecandidate = (e) => { if (e.candidate) signal(id, { candidate: e.candidate }); };
 
   pc.ontrack = (e) => {
     installReceiverCipher(e.receiver, id);
@@ -235,15 +231,19 @@ function connectTo(id, peer, initiator) {
     el.srcObject = stream;
     el.autoplay = true;
     el.playsInline = true;
+    el.volume = entry.volume ?? 1;
+    el.muted = !!entry.forcedMuted;
     entry.audioEl?.remove();
     entry.audioEl = el;
     audioBin.append(el);
     el.play().catch(() => showUnblock());
+    log('media', `receiving audio from ${entry.profile?.name || id.slice(0, 6)}`);
 
     watchSpeaking(id, stream);
   };
 
   pc.onconnectionstatechange = () => {
+    log('webrtc', `${peer.profile?.name || id.slice(0, 6)}: ${pc.connectionState}`);
     if (pc.connectionState === 'failed') pc.restartIce();
   };
 
@@ -252,52 +252,54 @@ function connectTo(id, peer, initiator) {
       try {
         await pc.setLocalDescription();
         signal(id, { sdp: pc.localDescription });
-      } catch (err) {
-        console.warn('negotiation failed', err);
-      }
+      } catch (err) { log('webrtc', `negotiation failed: ${err.message}`); }
     };
   }
 
-  applyEnvelope(id, peer.envelope);
+  // Kick off the Diffie-Hellman handshake for this link.
+  const dh = await makeEphemeralKeys();
+  const entry = peers.get(id);
+  if (!entry) return pc; // peer left mid-handshake
+  entry.dh = dh;
+  signal(id, { dh: dh.publicKeyB64 });
+  log('dh', `sent ephemeral public key to ${entry.profile?.name || id.slice(0, 6)}`);
+
+  const buffered = pendingDh.get(id);
+  if (buffered) { pendingDh.delete(id); await deriveWithPeer(id, buffered); }
+
   renderPeer(id);
   return pc;
 }
 
-/** Attach the decrypt transform to every audio receiver we know about yet. */
 function attachReceiveCiphers(pc, id) {
-  for (const tx of pc.getTransceivers()) {
-    if (tx.receiver) installReceiverCipher(tx.receiver, id);
-  }
+  for (const tx of pc.getTransceivers()) if (tx.receiver) installReceiverCipher(tx.receiver, id);
 }
 
-/** Try the key we were given against a peer's sealed session key. */
-async function applyEnvelope(id, envelope) {
+async function deriveWithPeer(id, peerPubB64) {
   const entry = peers.get(id);
   if (!entry) return;
-  entry.envelope = envelope || null;
-
-  const raw = envelope && listenKey ? await openSessionKey(envelope, listenKey) : null;
-  entry.decrypting = !!raw;
-  await setReceiveKey(id, raw);
-  renderPeer(id);
-}
-
-async function refreshAllEnvelopes() {
-  for (const [id, entry] of peers) {
-    if (id !== myId) await applyEnvelope(id, entry.envelope);
+  if (!entry.dh) { pendingDh.set(id, peerPubB64); return; } // our keys not ready yet
+  try {
+    const { key, fingerprint } = await deriveSharedKey(entry.dh.privateKey, peerPubB64, entry.dh.publicKeyB64);
+    setPeerKey(id, key);
+    entry.secured = true;
+    entry.fpr = fingerprint;
+    log('dh', `shared key established with ${entry.profile?.name || id.slice(0, 6)}`, { fingerprint });
+    renderPeer(id);
+  } catch (err) {
+    log('dh', `key agreement failed with ${id.slice(0, 6)}: ${err.message}`);
   }
-  updateKeyStatus();
 }
 
 async function onSignal(from, data) {
+  if (data.dh) { await deriveWithPeer(from, data.dh); return; }
+
   const entry = peers.get(from);
   if (!entry?.pc) return;
   const pc = entry.pc;
-
   try {
     if (data.sdp) {
       await pc.setRemoteDescription(data.sdp);
-      // The answering side's transceivers only exist now; attach before media flows.
       attachReceiveCiphers(pc, from);
       for (const c of entry.pending.splice(0)) await pc.addIceCandidate(c);
       if (data.sdp.type === 'offer') {
@@ -308,9 +310,7 @@ async function onSignal(from, data) {
       if (pc.remoteDescription) await pc.addIceCandidate(data.candidate);
       else entry.pending.push(data.candidate);
     }
-  } catch (err) {
-    console.warn('signal error', err);
-  }
+  } catch (err) { log('signal', `signal error: ${err.message}`); }
 }
 
 /* ---------- signaling socket ---------- */
@@ -321,13 +321,15 @@ function connect() {
 
   ws.onopen = () => {
     reconnectDelay = 1000;
-    ws.send(JSON.stringify({
-      type: 'join', profile, muted, encrypted: encrypting, envelope: sessionEnvelope,
-    }));
+    log('signal', 'connected to signaling server');
+    ws.send(JSON.stringify({ type: 'join', profile, muted, encrypted: encrypting }));
   };
 
   ws.onmessage = async (e) => {
     const msg = JSON.parse(e.data);
+    // Let the admin module handle its own message types first.
+    if (adminServerMessage(msg)) return;
+
     switch (msg.type) {
       case 'welcome': {
         myId = msg.id;
@@ -335,28 +337,33 @@ function connect() {
         renderPeer(myId);
         watchSpeaking(myId, localStream);
         setStatus(msg.peers.length ? 'connected' : 'connected — waiting for others', 'live');
-        // We just arrived, so we dial everyone already in the room.
+        log('system', `joined room with ${msg.peers.length} other(s)`);
         for (const p of msg.peers) connectTo(p.id, p, true);
-        updateKeyStatus();
         break;
       }
       case 'peer-join':
-        // They will dial us; just hold a connection ready to answer.
+        log('system', `${msg.peer.profile?.name || 'someone'} joined`);
         connectTo(msg.peer.id, msg.peer, false);
         setStatus('connected', 'live');
-        updateKeyStatus();
         break;
       case 'peer-leave':
+        log('system', 'a peer left');
         removePeer(msg.id);
         break;
       case 'peer-update': {
         const entry = peers.get(msg.peer.id);
         if (entry) {
-          entry.profile = msg.peer.profile;
-          entry.muted = msg.peer.muted;
-          entry.encrypted = msg.peer.encrypted;
-          await applyEnvelope(msg.peer.id, msg.peer.envelope);
+          Object.assign(entry, {
+            profile: msg.peer.profile,
+            muted: msg.peer.muted,
+            encrypted: msg.peer.encrypted,
+            admin: msg.peer.admin,
+            adminName: msg.peer.adminName,
+            forcedMuted: msg.peer.forcedMuted,
+            spotlight: msg.peer.spotlight,
+          });
           renderPeer(msg.peer.id);
+          refreshPopover(msg.peer.id);
         }
         break;
       }
@@ -366,11 +373,15 @@ function connect() {
       case 'full':
         setStatus(`the channel is full (${msg.max} people)`, 'error');
         break;
+      case 'locked':
+        setStatus('the room is locked right now', 'error');
+        break;
     }
   };
 
   ws.onclose = () => {
     for (const id of [...peers.keys()]) removePeer(id);
+    if (ejected) return; // an admin removed us; don't crawl back in
     setStatus('reconnecting…');
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 10000);
@@ -381,28 +392,25 @@ function connect() {
 
 function pushUpdate() {
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'update', profile, muted, encrypted: encrypting, envelope: sessionEnvelope,
-    }));
+    ws.send(JSON.stringify({ type: 'update', profile, muted, encrypted: encrypting }));
   }
   const me = peers.get(myId);
-  if (me) {
-    me.profile = profile;
-    me.muted = muted;
-    me.encrypted = encrypting;
-    renderPeer(myId);
-  }
+  if (me) { me.profile = profile; me.muted = muted; me.encrypted = encrypting; renderPeer(myId); }
 }
 
 /* ---------- controls ---------- */
 
 function setMuted(next) {
   muted = next;
-  for (const track of localStream.getAudioTracks()) track.enabled = !muted;
+  for (const track of localStream.getAudioTracks()) track.enabled = !muted && !peers.get(myId)?.forcedMuted;
   $('muteIco').textContent = muted ? '🔇' : '🎙️';
   $('muteLabel').textContent = muted ? 'unmute' : 'mute';
   $('muteBtn').classList.toggle('off', muted);
   pushUpdate();
+}
+
+function applyForcedMuteToSelf() {
+  for (const track of localStream.getAudioTracks()) track.enabled = false;
 }
 
 function showUnblock() {
@@ -420,15 +428,12 @@ $('unblock').onclick = async () => {
 
 $('muteBtn').onclick = () => setMuted(!muted);
 
-/* Encryption. Off by default. When on, outgoing audio is AES-GCM encrypted under
-   a session key that RSA-OAEP seals to our identity; only listeners holding our
-   private key can open it. Everyone else hears static. */
 function setEncrypting(next) {
   encrypting = next;
   setEncryptionEnabled(encrypting);
   $('encryptBtn').classList.toggle('on', encrypting);
   $('encryptLabel').textContent = encrypting ? 'encryption: on' : 'encryption: off';
-  $('encryptNote').hidden = !encrypting;
+  log('dh', `app-layer encryption ${encrypting ? 'enabled' : 'disabled'}`);
   pushUpdate();
 }
 
@@ -436,110 +441,22 @@ if (!cipherSupported) {
   $('encryptBtn').disabled = true;
   $('encryptBtn').title = 'This browser has no encoded-transform support';
 }
-
 $('encryptBtn').onclick = () => setEncrypting(!encrypting);
-
-/* key panel */
-
-const keySheet = $('keySheet');
-
-function updateKeyStatus() {
-  const heard = [...peers].filter(([id, p]) => id !== myId && p.encrypted).length;
-  const open = [...peers].filter(([id, p]) => id !== myId && p.encrypted && p.decrypting).length;
-  const el = $('keyStatus');
-
-  if (!listenKey) {
-    el.textContent = heard
-      ? `${heard} encrypted ${heard === 1 ? 'person' : 'people'} in the room — paste their key to hear them`
-      : 'no key set — encrypted people will sound like static';
-    el.className = 'key-status';
-  } else if (!heard) {
-    el.textContent = 'key loaded — nobody is encrypting right now';
-    el.className = 'key-status ok';
-  } else {
-    el.textContent = `key opens ${open} of ${heard} encrypted ${heard === 1 ? 'stream' : 'streams'}`;
-    el.className = open ? 'key-status ok' : 'key-status bad';
-  }
-}
-
-async function showIdentity() {
-  $('myKey').value = identity.privateKey;
-  $('myKeyPrint').textContent = await fingerprint(identity.publicKey);
-  $('listenInput').value = listenKey;
-  updateKeyStatus();
-}
-
-$('keyBtn').onclick = async () => {
-  await showIdentity();
-  keySheet.hidden = false;
-};
-
-$('keyDoneBtn').onclick = () => { keySheet.hidden = true; };
-keySheet.onclick = (e) => { if (e.target === keySheet) keySheet.hidden = true; };
-
-$('copyKeyBtn').onclick = async () => {
-  try {
-    await navigator.clipboard.writeText(identity.privateKey);
-    $('copyKeyLabel').textContent = 'copied!';
-  } catch {
-    $('myKey').select();
-    $('copyKeyLabel').textContent = 'press Ctrl+C';
-  }
-  setTimeout(() => ($('copyKeyLabel').textContent = 'copy key'), 1800);
-};
-
-$('newKeyBtn').onclick = async () => {
-  identity = await newIdentity();
-  await rotateSessionKey();
-  await showIdentity();
-  pushUpdate();
-};
-
-$('listenBtn').onclick = async () => {
-  const text = $('listenInput').value.trim();
-  if (text && !(await validatePrivateKey(text))) {
-    $('keyStatus').textContent = "that doesn't look like an RSA private key";
-    $('keyStatus').className = 'key-status bad';
-    return;
-  }
-  listenKey = text;
-  try {
-    localStorage.setItem('vc-listen-key', listenKey);
-  } catch { /* not persisted */ }
-  await refreshAllEnvelopes();
-};
-
-$('clearListenBtn').onclick = async () => {
-  listenKey = '';
-  $('listenInput').value = '';
-  localStorage.removeItem('vc-listen-key');
-  await refreshAllEnvelopes();
-};
-
-/** New AES session key, sealed to our own public key for listeners to open. */
-async function rotateSessionKey() {
-  sessionKeyRaw = crypto.getRandomValues(new Uint8Array(32));
-  sessionEnvelope = await sealSessionKey(sessionKeyRaw, identity.publicKey);
-  await setSendKey(sessionKeyRaw);
-}
-
-document.addEventListener('keydown', (e) => {
-  if (e.key.toLowerCase() === 'm' && !$('sheet').contains(document.activeElement)) {
-    if (document.activeElement?.tagName !== 'INPUT') setMuted(!muted);
-  }
-});
 
 $('copyBtn').onclick = async () => {
   try {
     await navigator.clipboard.writeText(location.href);
     $('copyLabel').textContent = 'copied!';
     setTimeout(() => ($('copyLabel').textContent = 'copy link'), 1500);
-  } catch {
-    prompt('Copy this link:', location.href);
-  }
+  } catch { prompt('Copy this link:', location.href); }
 };
 
-/* profile editor */
+document.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'm' && document.activeElement?.tagName !== 'INPUT'
+    && document.activeElement?.tagName !== 'TEXTAREA') setMuted(!muted);
+});
+
+/* ---------- profile editor ---------- */
 
 const sheet = $('sheet');
 
@@ -548,22 +465,14 @@ function refreshPreview() {
   $('nameInput').value = profile.name;
 }
 
-$('editBtn').onclick = () => {
-  refreshPreview();
-  sheet.hidden = false;
-  $('nameInput').focus();
-};
-
+$('editBtn').onclick = () => { refreshPreview(); sheet.hidden = false; $('nameInput').focus(); };
 $('doneBtn').onclick = () => {
   profile.name = $('nameInput').value.trim().slice(0, 24) || profile.name;
   sheet.hidden = true;
   saveProfile(profile);
   pushUpdate();
 };
-
-sheet.onclick = (e) => {
-  if (e.target === sheet) $('doneBtn').click();
-};
+sheet.onclick = (e) => { if (e.target === sheet) $('doneBtn').click(); };
 
 $('rerollBtn').onclick = () => {
   profile.emoji = pick(EMOJI.filter((x) => x !== profile.emoji));
@@ -582,13 +491,10 @@ $('fileInput').onchange = async (e) => {
     refreshPreview();
     saveProfile(profile);
     pushUpdate();
-  } catch {
-    alert("couldn't read that image");
-  }
+  } catch { alert("couldn't read that image"); }
   e.target.value = '';
 };
 
-// Downscale to a small square so avatars stay well under the signaling size limit.
 function squareThumbnail(file, size) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -602,15 +508,135 @@ function squareThumbnail(file, size) {
       URL.revokeObjectURL(url);
       resolve(canvas.toDataURL('image/jpeg', 0.82));
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('bad image'));
-    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('bad image')); };
     img.src = url;
   });
 }
 
-/* ---------- boot: join the one channel on load ---------- */
+/* ---------- peer popover: local volume + admin actions ---------- */
+
+let popoverId = null;
+
+function openPopover(id) {
+  const entry = peers.get(id);
+  if (!entry) return;
+  popoverId = id;
+  $('popover').hidden = false; // unhide first so refreshPopover doesn't early-return
+  refreshPopover(id);
+}
+
+function refreshPopover(id) {
+  if (popoverId !== id || $('popover').hidden) return;
+  const entry = peers.get(id);
+  if (!entry) { closePopover(); return; }
+  const name = entry.admin && entry.adminName ? entry.adminName : entry.profile?.name;
+  $('popTitle').textContent = name || 'user';
+  $('popFpr').textContent = entry.secured ? `secured · ${entry.fpr}` : 'not encrypted yet';
+
+  const vol = $('popVolume');
+  vol.hidden = id === myId; // no local volume slider for yourself
+  vol.value = Math.round((entry.volume ?? 1) * 100);
+
+  // Admin actions only render for an authenticated admin, and never against another admin.
+  const canModerate = isAdmin() && id !== myId && !entry.admin;
+  $('popAdmin').hidden = !canModerate;
+}
+
+function closePopover() { popoverId = null; $('popover').hidden = true; }
+
+$('popClose').onclick = closePopover;
+$('popover').onclick = (e) => { if (e.target === $('popover')) closePopover(); };
+
+$('popVolume').oninput = (e) => {
+  const entry = peers.get(popoverId);
+  if (!entry) return;
+  entry.volume = e.target.value / 100;
+  if (entry.audioEl) entry.audioEl.volume = entry.volume;
+};
+
+/* ---------- console / debug panel ---------- */
+
+const activeCats = new Set(Object.keys(CATEGORIES));
+const logList = $('logList');
+
+function logRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'logrow';
+  row.dataset.cat = entry.category;
+  const time = new Date(entry.t).toLocaleTimeString();
+  const cat = CATEGORIES[entry.category];
+  row.innerHTML = `<span class="logtime">${time}</span>`
+    + `<span class="logcat" style="color:${cat.color}">${cat.label}</span>`
+    + `<span class="logmsg"></span>`;
+  row.querySelector('.logmsg').textContent = entry.message + (entry.data ? `  ${entry.data}` : '');
+  row.hidden = !activeCats.has(entry.category);
+  return row;
+}
+
+function renderLog() {
+  logList.innerHTML = '';
+  for (const entry of getEntries()) logList.append(logRow(entry));
+  logList.scrollTop = logList.scrollHeight;
+}
+
+onLog((entry) => {
+  if (!entry) { renderLog(); return; }
+  if ($('console').hidden) return;
+  logList.append(logRow(entry));
+  logList.scrollTop = logList.scrollHeight;
+});
+
+$('consoleBtn').onclick = () => { renderLog(); $('console').hidden = false; };
+$('consoleDone').onclick = () => { $('console').hidden = true; };
+$('console').onclick = (e) => { if (e.target === $('console')) $('console').hidden = true; };
+$('logClear').onclick = () => clearLog();
+
+// Category filter chips.
+$('logChips').innerHTML = Object.entries(CATEGORIES)
+  .map(([k, v]) => `<button class="chip on" data-cat="${k}" style="--c:${v.color}">${v.label}</button>`)
+  .join('');
+$('logChips').onclick = (e) => {
+  const btn = e.target.closest('.chip');
+  if (!btn) return;
+  const cat = btn.dataset.cat;
+  if (activeCats.has(cat)) { activeCats.delete(cat); btn.classList.remove('on'); }
+  else { activeCats.add(cat); btn.classList.add('on'); }
+  for (const row of logList.children) row.hidden = !activeCats.has(row.dataset.cat);
+};
+
+$('themeSelect').onchange = (e) => applyTheme(e.target.value);
+
+/* ---------- admin wiring ---------- */
+
+initAdmin({
+  sendAction: (action, target, extra = {}) => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'admin-action', action, target, ...extra }));
+  },
+  login: (username, password) => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'admin-login', username, password }));
+  },
+  getPeers: () => peers,
+  getMyId: () => myId,
+  log,
+  onKicked: (text) => { ejected = true; setStatus(text || 'you were removed by an admin', 'error'); ws?.close(); },
+});
+
+// Admin actions from the peer popover.
+$('popAdmin').onclick = (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || popoverId == null) return;
+  const action = btn.dataset.action;
+  const target = popoverId;
+  const send = (extra) => ws?.readyState === WebSocket.OPEN
+    && ws.send(JSON.stringify({ type: 'admin-action', action, target, ...(extra || {}) }));
+
+  if (action === 'warn') { const t = prompt('warn message:'); if (t) send({ text: t }); }
+  else if (action === 'rename') { const t = prompt('new name:'); if (t != null) send({ text: t }); }
+  else if (action === 'mute') { const entry = peers.get(target); send({ value: !entry?.forcedMuted }); }
+  else send();
+};
+
+/* ---------- boot ---------- */
 
 (async function start() {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -627,13 +653,13 @@ function squareThumbnail(file, size) {
     setStatus('microphone blocked — allow it and reload', 'error');
     return;
   }
-  setStatus('preparing keys…');
-  identity = await loadIdentity();
-  await rotateSessionKey();
+
+  setEncryptionEnabled(encrypting);
+  setEncrypting(encrypting);
+  log('system', 'Diffie-Hellman ready; each link derives its own key');
 
   setStatus('connecting…');
   connect();
-  // Any interaction is a chance to un-suspend audio if the browser held it back.
   for (const evt of ['pointerdown', 'keydown', 'touchstart']) {
     document.addEventListener(evt, () => audioCtx?.resume().catch(() => {}));
   }

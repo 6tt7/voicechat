@@ -1,7 +1,8 @@
-// Attaches the cipher to outgoing and incoming audio, preferring the standard
-// RTCRtpScriptTransform (worker) and falling back to Chrome's older
-// createEncodedStreams (main thread).
-import { createCipherTransform, importAesKey } from './voice-cipher.js';
+// Attaches the audio cipher to senders and receivers. Each peer link has its
+// own AES-GCM key (derived by ECDH — see crypto-dh.js), so keys are stored per
+// peer id. Prefers the standard RTCRtpScriptTransform (worker), falling back to
+// Chrome's older createEncodedStreams (main thread).
+import { createCipherTransform } from './voice-cipher.js';
 
 const hasScriptTransform = typeof window.RTCRtpScriptTransform === 'function';
 const hasEncodedStreams = typeof RTCRtpSender.prototype.createEncodedStreams === 'function';
@@ -9,14 +10,9 @@ const hasEncodedStreams = typeof RTCRtpSender.prototype.createEncodedStreams ===
 export const cipherMode = hasScriptTransform ? 'worker' : hasEncodedStreams ? 'main' : null;
 export const cipherSupported = cipherMode !== null;
 
-// Used by the main-thread fallback; the worker keeps its own copies in sync.
-const sending = { enabled: false, key: null };
-const receiving = new Map();
-
-function receivingCtx(peerId) {
-  if (!receiving.has(peerId)) receiving.set(peerId, { key: null });
-  return receiving.get(peerId);
-}
+// Main-thread fallback state; the worker keeps its own mirror.
+let enabled = false;
+const keys = new Map(); // peerId -> CryptoKey (used for both directions of a link)
 
 let worker = null;
 function cipherWorker() {
@@ -29,7 +25,7 @@ export function pcCipherOptions() {
   return hasScriptTransform ? {} : { encodedInsertableStreams: hasEncodedStreams };
 }
 
-function attach(target, options, direction, ctx) {
+function attach(target, options, direction, peerId) {
   if (!cipherSupported || target.__ciphered) return;
   target.__ciphered = true;
 
@@ -37,6 +33,7 @@ function attach(target, options, direction, ctx) {
     if (cipherMode === 'worker') {
       target.transform = new RTCRtpScriptTransform(cipherWorker(), options);
     } else {
+      const ctx = { get enabled() { return enabled; }, get key() { return keys.get(peerId); } };
       const { readable, writable } = target.createEncodedStreams();
       readable
         .pipeThrough(createCipherTransform(ctx, direction))
@@ -49,40 +46,28 @@ function attach(target, options, direction, ctx) {
   }
 }
 
-export function installSenderCipher(sender) {
-  attach(sender, { operation: 'encrypt' }, 'encrypt', sending);
+export function installSenderCipher(sender, peerId) {
+  attach(sender, { operation: 'encrypt', peerId }, 'encrypt', peerId);
 }
 
 export function installReceiverCipher(receiver, peerId) {
-  attach(receiver, { operation: 'decrypt', peerId }, 'decrypt', receivingCtx(peerId));
+  attach(receiver, { operation: 'decrypt', peerId }, 'decrypt', peerId);
 }
 
 export function setEncryptionEnabled(on) {
-  sending.enabled = on;
+  enabled = on;
   if (cipherMode === 'worker') cipherWorker().postMessage({ type: 'enabled', value: on });
 }
 
-/** @param {Uint8Array|null} raw AES key bytes used for our outgoing audio */
-export async function setSendKey(raw) {
-  sending.key = raw ? await importAesKey(raw, 'encrypt') : null;
-  if (cipherMode === 'worker') {
-    cipherWorker().postMessage({ type: 'sendKey', raw: raw ? raw.buffer.slice(0) : null });
-  }
-}
-
-/** @param {Uint8Array|null} raw AES key bytes recovered for one peer's audio */
-export async function setReceiveKey(peerId, raw) {
-  receivingCtx(peerId).key = raw ? await importAesKey(raw, 'decrypt') : null;
-  if (cipherMode === 'worker') {
-    cipherWorker().postMessage({
-      type: 'receiveKey',
-      peerId,
-      raw: raw ? raw.buffer.slice(0) : null,
-    });
-  }
+/** @param {CryptoKey|null} key the ECDH-derived AES-GCM key for this link */
+export function setPeerKey(peerId, key) {
+  if (key) keys.set(peerId, key); else keys.delete(peerId);
+  // CryptoKey is structured-cloneable, so the derived key crosses to the worker
+  // without ever being exported to raw bytes.
+  if (cipherMode === 'worker') cipherWorker().postMessage({ type: 'peerKey', peerId, key: key || null });
 }
 
 export function forgetPeer(peerId) {
-  receiving.delete(peerId);
+  keys.delete(peerId);
   if (cipherMode === 'worker') cipherWorker().postMessage({ type: 'forget', peerId });
 }

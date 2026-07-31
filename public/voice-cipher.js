@@ -1,8 +1,9 @@
 // Frame-level cipher, shared by the worker and the main-thread fallback.
 //
-// Audio frames are encrypted with AES-GCM under a session key that RSA-OAEP
-// delivered (see keys.js). Holders of the key decrypt and hear you normally;
-// everyone else feeds ciphertext into their Opus decoder and hears static.
+// Audio frames are encrypted with AES-GCM under a per-link key that ECDH
+// (Diffie-Hellman) derived — see crypto-dh.js. Both ends of a link derive the
+// same key, so each decrypts the other; anyone without it (the server, a
+// third party) feeds ciphertext into their Opus decoder and hears static.
 //
 // Wire format of an encrypted frame:
 //   [ opus TOC (1) ][ ciphertext+tag ][ iv (12) ][ magic (2) ]
@@ -17,10 +18,6 @@ const IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const MAGIC = [0x5a, 0xe5];
 const MIN_ENCRYPTED = CLEAR_HEADER_BYTES + GCM_TAG_BYTES + IV_BYTES + MAGIC.length;
-
-export function importAesKey(raw, usage) {
-  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, [usage]);
-}
 
 /**
  * @param {{enabled?: boolean, key: CryptoKey|null}} ctx mutated live from outside

@@ -1,31 +1,22 @@
-// Runs the frame cipher off the main thread via RTCRtpScriptTransform.
-import { createCipherTransform, importAesKey } from './voice-cipher.js';
+// Runs the audio cipher off the main thread via RTCRtpScriptTransform.
+// Keys are per peer link (ECDH-derived) and arrive as structured-cloned
+// CryptoKey objects — never as raw bytes.
+import { createCipherTransform } from './voice-cipher.js';
 
-const sending = { enabled: false, key: null };
-/** peer id -> { key } for that peer's incoming audio */
-const receiving = new Map();
+let enabled = false;
+const keys = new Map(); // peerId -> CryptoKey
 
-function receivingCtx(peerId) {
-  if (!receiving.has(peerId)) receiving.set(peerId, { key: null });
-  return receiving.get(peerId);
-}
-
-self.onmessage = async (e) => {
+self.onmessage = (e) => {
   const msg = e.data || {};
   switch (msg.type) {
     case 'enabled':
-      sending.enabled = !!msg.value;
+      enabled = !!msg.value;
       break;
-    case 'sendKey':
-      sending.key = msg.raw ? await importAesKey(msg.raw, 'encrypt') : null;
+    case 'peerKey':
+      if (msg.key) keys.set(msg.peerId, msg.key); else keys.delete(msg.peerId);
       break;
-    case 'receiveKey': {
-      const ctx = receivingCtx(msg.peerId);
-      ctx.key = msg.raw ? await importAesKey(msg.raw, 'decrypt') : null;
-      break;
-    }
     case 'forget':
-      receiving.delete(msg.peerId);
+      keys.delete(msg.peerId);
       break;
   }
 };
@@ -33,7 +24,10 @@ self.onmessage = async (e) => {
 // Fired once per sender/receiver that gets an RTCRtpScriptTransform attached.
 self.onrtctransform = (event) => {
   const { operation, peerId } = event.transformer.options;
-  const ctx = operation === 'encrypt' ? sending : receivingCtx(peerId);
+  const ctx = {
+    get enabled() { return enabled; },
+    get key() { return keys.get(peerId); },
+  };
   const { readable, writable } = event.transformer;
 
   readable

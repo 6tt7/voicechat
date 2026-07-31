@@ -10,6 +10,30 @@
   --encrypted: #ffb547;
 }
 
+:root[data-theme="light"] {
+  --bg: #f4f5fa;
+  --card: #ffffff;
+  --line: #dfe2ee;
+  --text: #1a1d29;
+  --dim: #5a6178;
+  --accent: #5563e6;
+  --live: #1fae7a;
+  --danger: #e2504e;
+  --encrypted: #d98a1a;
+}
+
+:root[data-theme="midnight"] {
+  --bg: #05060c;
+  --card: #0c1020;
+  --line: #1b2340;
+  --text: #dfe6ff;
+  --dim: #7f89b8;
+  --accent: #8aa0ff;
+  --live: #4ee6a8;
+  --danger: #ff7a7a;
+  --encrypted: #ffcf6b;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -416,8 +440,191 @@ footer {
 
 #audio { display: none; }
 
+/* ---------- peer card extras ---------- */
+
+.peer { cursor: pointer; }
+
+.sub {
+  font-size: 10px;
+  color: var(--live);
+  font-family: ui-monospace, Consolas, monospace;
+  min-height: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer.spotlight .avatar {
+  outline: 3px solid var(--encrypted);
+  outline-offset: 5px;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse { 50% { outline-offset: 9px; } }
+
+/* ---------- admin stage ---------- */
+
+.stage {
+  list-style: none;
+  margin: 0 auto 6px;
+  padding: 0 20px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 26px 30px;
+  max-width: 760px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.stage.active { padding-top: 6px; }
+.stage:empty, .stage:not(.active) { display: none; }
+
+.stage .avatar { width: 104px; height: 104px; font-size: 46px; }
+.stage .peer { width: 132px; }
+
+.peer.admin .avatar::before {
+  content: "👑";
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 22px;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .5));
+}
+
+.peer.admin .avatar {
+  box-shadow: 0 0 0 3px transparent;
+  background-clip: padding-box;
+}
+
+.peer.admin .name {
+  font-weight: 700;
+  background: linear-gradient(90deg, #ff5a5a, #ffb547, #46d39a, #5ec8f2, #c084fc, #ff5a5a);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: rgb 4s linear infinite;
+}
+
+@keyframes rgb { to { background-position: 300% 0; } }
+
+/* ---------- console / logs ---------- */
+
+.console-head { display: flex; justify-content: space-between; align-items: center; }
+.theme { font-size: 12px; color: var(--dim); display: flex; gap: 6px; align-items: center; }
+.theme select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 12px;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 10px; }
+.chip {
+  border: 1px solid var(--line); background: transparent; color: var(--dim);
+  border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.chip.on { color: var(--c); border-color: var(--c); }
+
+.logbox {
+  height: 46vh; overflow-y: auto; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+}
+.logrow { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
+.logtime { color: var(--dim); flex: none; }
+.logcat { flex: none; min-width: 84px; }
+.logmsg { color: var(--text); word-break: break-word; }
+
+/* ---------- admin panel ---------- */
+
+.admin-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 92px;
+  width: min(320px, calc(100vw - 32px));
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  z-index: 8;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .4);
+}
+.admin-panel[hidden] { display: none; }
+.admin-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 6px; }
+.admin-head b { color: var(--encrypted); }
+.x { background: none; border: 0; color: var(--dim); font-size: 15px; cursor: pointer; }
+.row.wrap { flex-wrap: wrap; }
+.admin-panel input, .admin-panel .row { margin-top: 8px; }
+.admin-panel input {
+  flex: 1; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 10px; padding: 9px 11px; font: inherit; min-width: 0;
+}
+.btn.on { border-color: var(--encrypted); color: var(--encrypted); }
+
+/* ---------- popover ---------- */
+
+.sheet-card.pop { width: min(340px, 100%); }
+.pop-head { display: flex; justify-content: space-between; align-items: center; }
+.pop-head b { font-size: 15px; }
+.pop-fpr { color: var(--dim); font-size: 12px; margin: 4px 0 14px; font-family: ui-monospace, Consolas, monospace; }
+.vol { display: block; font-size: 12px; color: var(--dim); }
+.vol input { width: 100%; margin-top: 8px; accent-color: var(--accent); }
+.admin-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+
+.admin-panel input:focus, .adminSheet input:focus, #adminUser:focus, #adminPass:focus { outline: none; border-color: var(--accent); }
+#adminUser, #adminPass { width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 10px 12px; font: inherit; margin-bottom: 10px; }
+
+/* ---------- announce banner, toast, warning, confetti ---------- */
+
+.announce {
+  text-align: center;
+  margin: 0 auto;
+  padding: 10px 18px;
+  max-width: 620px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--encrypted) 18%, var(--card));
+  border: 1px solid var(--encrypted);
+  border-radius: 12px;
+  font-size: 14px;
+  min-height: 20px;
+}
+.announce[hidden] { display: none; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  z-index: 20;
+}
+.toast[hidden] { display: none; }
+
+.warn-body { color: var(--text); font-size: 15px; margin: 6px 0 18px; }
+
+.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 30; overflow: hidden; }
+.confetti i {
+  position: absolute;
+  top: -12px;
+  width: 9px;
+  height: 14px;
+  border-radius: 2px;
+  animation: fall 2.4s linear forwards;
+}
+@keyframes fall {
+  to { transform: translateY(104vh) rotate(540deg); opacity: .2; }
+}
+
 @media (max-width: 420px) {
   .grid { gap: 20px; }
   .peer { width: 96px; }
   .avatar { width: 70px; height: 70px; font-size: 32px; }
+  .stage .avatar { width: 84px; height: 84px; font-size: 38px; }
+  .admin-panel { right: 8px; left: 8px; width: auto; }
 }
