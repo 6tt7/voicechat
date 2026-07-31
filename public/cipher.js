@@ -1,7 +1,7 @@
-// Attaches the debug cipher to outgoing audio, preferring the standard
+// Attaches the cipher to outgoing and incoming audio, preferring the standard
 // RTCRtpScriptTransform (worker) and falling back to Chrome's older
 // createEncodedStreams (main thread).
-import { createCipherTransform } from './voice-cipher.js';
+import { createCipherTransform, importAesKey } from './voice-cipher.js';
 
 const hasScriptTransform = typeof window.RTCRtpScriptTransform === 'function';
 const hasEncodedStreams = typeof RTCRtpSender.prototype.createEncodedStreams === 'function';
@@ -9,8 +9,14 @@ const hasEncodedStreams = typeof RTCRtpSender.prototype.createEncodedStreams ===
 export const cipherMode = hasScriptTransform ? 'worker' : hasEncodedStreams ? 'main' : null;
 export const cipherSupported = cipherMode !== null;
 
-// Shared with the main-thread transforms; the worker keeps its own copy in sync.
-const state = { enabled: false };
+// Used by the main-thread fallback; the worker keeps its own copies in sync.
+const sending = { enabled: false, key: null };
+const receiving = new Map();
+
+function receivingCtx(peerId) {
+  if (!receiving.has(peerId)) receiving.set(peerId, { key: null });
+  return receiving.get(peerId);
+}
 
 let worker = null;
 function cipherWorker() {
@@ -23,27 +29,60 @@ export function pcCipherOptions() {
   return hasScriptTransform ? {} : { encodedInsertableStreams: hasEncodedStreams };
 }
 
-export function installSenderCipher(sender) {
-  if (!cipherSupported || sender.__ciphered) return;
-  sender.__ciphered = true;
+function attach(target, options, direction, ctx) {
+  if (!cipherSupported || target.__ciphered) return;
+  target.__ciphered = true;
 
   try {
     if (cipherMode === 'worker') {
-      sender.transform = new RTCRtpScriptTransform(cipherWorker(), { operation: 'encrypt' });
+      target.transform = new RTCRtpScriptTransform(cipherWorker(), options);
     } else {
-      const { readable, writable } = sender.createEncodedStreams();
+      const { readable, writable } = target.createEncodedStreams();
       readable
-        .pipeThrough(createCipherTransform(state))
+        .pipeThrough(createCipherTransform(ctx, direction))
         .pipeTo(writable)
-        .catch(() => { /* sender closed */ });
+        .catch(() => { /* transport closed */ });
     }
   } catch (err) {
-    console.warn('cipher unavailable on this sender', err);
-    sender.__ciphered = false;
+    console.warn('cipher unavailable', err);
+    target.__ciphered = false;
   }
 }
 
-export function setCipherEnabled(on) {
-  state.enabled = on;
+export function installSenderCipher(sender) {
+  attach(sender, { operation: 'encrypt' }, 'encrypt', sending);
+}
+
+export function installReceiverCipher(receiver, peerId) {
+  attach(receiver, { operation: 'decrypt', peerId }, 'decrypt', receivingCtx(peerId));
+}
+
+export function setEncryptionEnabled(on) {
+  sending.enabled = on;
   if (cipherMode === 'worker') cipherWorker().postMessage({ type: 'enabled', value: on });
+}
+
+/** @param {Uint8Array|null} raw AES key bytes used for our outgoing audio */
+export async function setSendKey(raw) {
+  sending.key = raw ? await importAesKey(raw, 'encrypt') : null;
+  if (cipherMode === 'worker') {
+    cipherWorker().postMessage({ type: 'sendKey', raw: raw ? raw.buffer.slice(0) : null });
+  }
+}
+
+/** @param {Uint8Array|null} raw AES key bytes recovered for one peer's audio */
+export async function setReceiveKey(peerId, raw) {
+  receivingCtx(peerId).key = raw ? await importAesKey(raw, 'decrypt') : null;
+  if (cipherMode === 'worker') {
+    cipherWorker().postMessage({
+      type: 'receiveKey',
+      peerId,
+      raw: raw ? raw.buffer.slice(0) : null,
+    });
+  }
+}
+
+export function forgetPeer(peerId) {
+  receiving.delete(peerId);
+  if (cipherMode === 'worker') cipherWorker().postMessage({ type: 'forget', peerId });
 }

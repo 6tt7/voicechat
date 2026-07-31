@@ -33,13 +33,16 @@
     <button id="copyBtn" class="btn" title="Copy the room link">
       <span class="ico">🔗</span><span id="copyLabel">copy link</span>
     </button>
-    <button id="scrambleBtn" class="btn debug" title="Debug: encrypt your outgoing audio and let peers play the ciphertext">
-      <span class="ico">🔒</span><span id="scrambleLabel">encrypt (debug)</span>
+    <button id="encryptBtn" class="btn debug" title="Encrypt your outgoing audio; only listeners holding your key can hear it">
+      <span class="ico">🔒</span><span id="encryptLabel">encryption: off</span>
+    </button>
+    <button id="keyBtn" class="btn debug" title="Show your encryption key, or paste someone else's">
+      <span class="ico">🔑</span><span>keys</span>
     </button>
   </footer>
 
-  <p class="debug-note" id="debugNote" hidden>
-    your voice is encrypted with a key nobody has — everyone else hears static, and you can't hear it yourself
+  <p class="debug-note" id="encryptNote" hidden>
+    your voice is encrypted — only people who paste your key hear you, everyone else gets static
   </p>
 
   <div class="sheet" id="sheet" hidden>
@@ -58,6 +61,33 @@
         </div>
       </div>
       <button class="btn primary wide" id="doneBtn">done</button>
+    </div>
+  </div>
+
+  <div class="sheet" id="keySheet" hidden>
+    <div class="sheet-card wide-card">
+      <h2>your encryption key</h2>
+      <p class="hint tight">
+        anyone you give this to can hear you while encryption is on. it never leaves your browser
+        unless you copy it out.
+      </p>
+      <textarea id="myKey" class="keybox" readonly spellcheck="false"></textarea>
+      <div class="row">
+        <button class="btn small" id="copyKeyBtn">📋 <span id="copyKeyLabel">copy key</span></button>
+        <button class="btn small" id="newKeyBtn">♻️ new key</button>
+        <span class="print">fingerprint <code id="myKeyPrint">…</code></span>
+      </div>
+
+      <h2 class="spaced">hear someone encrypted</h2>
+      <p class="hint tight">paste the key they sent you, then press listen.</p>
+      <textarea id="listenInput" class="keybox" spellcheck="false" placeholder="paste an RSA private key here"></textarea>
+      <div class="row">
+        <button class="btn small" id="listenBtn">🔓 listen</button>
+        <button class="btn small" id="clearListenBtn">✕ clear</button>
+      </div>
+      <p class="key-status" id="keyStatus"></p>
+
+      <button class="btn primary wide" id="keyDoneBtn">done</button>
     </div>
   </div>
 

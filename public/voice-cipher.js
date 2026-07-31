@@ -1,64 +1,85 @@
-// Core of the debug cipher, shared by the worker and the main-thread fallback.
+// Frame-level cipher, shared by the worker and the main-thread fallback.
 //
-// Encrypts outgoing encoded audio frames with AES-CTR. The key is generated
-// locally and never sent anywhere, so no peer can undo this — which is the
-// point: receivers play the ciphertext straight into their Opus decoder.
+// Audio frames are encrypted with AES-GCM under a session key that RSA-OAEP
+// delivered (see keys.js). Holders of the key decrypt and hear you normally;
+// everyone else feeds ciphertext into their Opus decoder and hears static.
 //
-// AES-CTR is a keystream cipher, so ciphertext is exactly as long as the
-// plaintext and the RTP framing stays valid.
+// Wire format of an encrypted frame:
+//   [ opus TOC (1) ][ ciphertext+tag ][ iv (12) ][ magic (2) ]
+//
+// The Opus TOC byte stays in the clear so the far-end decoder keeps parsing
+// frames — that is what makes undecrypted audio audible static rather than
+// silent decode failures. The trailing magic marks a frame as ours, so a
+// listener holding a key never mangles someone's unencrypted audio.
 
-// The Opus TOC byte carries the frame's mode/bandwidth/stride. Leaving it clear
-// keeps the far-end decoder parsing frames, so the ciphertext comes out as
-// audible static instead of silent decode failures.
 const CLEAR_HEADER_BYTES = 1;
+const IV_BYTES = 12;
+const GCM_TAG_BYTES = 16;
+const MAGIC = [0x5a, 0xe5];
+const MIN_ENCRYPTED = CLEAR_HEADER_BYTES + GCM_TAG_BYTES + IV_BYTES + MAGIC.length;
 
-let keyPromise = null;
-
-function sessionKey() {
-  keyPromise ||= crypto.subtle.importKey(
-    'raw',
-    crypto.getRandomValues(new Uint8Array(16)),
-    'AES-CTR',
-    false,
-    ['encrypt'],
-  );
-  return keyPromise;
+export function importAesKey(raw, usage) {
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, [usage]);
 }
 
 /**
- * @param {{enabled: boolean}} state live toggle, flipped from outside
- * @returns {TransformStream} for an RTCRtpSender's encoded frame stream
+ * @param {{enabled?: boolean, key: CryptoKey|null}} ctx mutated live from outside
+ * @param {'encrypt'|'decrypt'} direction
  */
-export function createCipherTransform(state) {
-  let counter = 0;
-
+export function createCipherTransform(ctx, direction) {
+  const apply = direction === 'encrypt' ? encryptFrame : decryptFrame;
   return new TransformStream({
     async transform(frame, controller) {
-      if (!state.enabled || frame.data.byteLength <= CLEAR_HEADER_BYTES) {
-        controller.enqueue(frame);
-        return;
-      }
-
-      try {
-        const data = new Uint8Array(frame.data);
-        // Unique counter block per frame so no keystream is ever reused.
-        const iv = new Uint8Array(16);
-        new DataView(iv.buffer).setUint32(12, counter++ >>> 0);
-
-        const ciphertext = new Uint8Array(
-          await crypto.subtle.encrypt(
-            { name: 'AES-CTR', counter: iv, length: 32 },
-            await sessionKey(),
-            data.subarray(CLEAR_HEADER_BYTES),
-          ),
-        );
-        data.set(ciphertext, CLEAR_HEADER_BYTES);
-        frame.data = data.buffer;
-      } catch {
-        // Never drop the stream over a debug feature; send the frame untouched.
-      }
-
+      await apply(frame, ctx);
       controller.enqueue(frame);
     },
   });
+}
+
+async function encryptFrame(frame, ctx) {
+  if (!ctx.enabled || !ctx.key || frame.data.byteLength <= CLEAR_HEADER_BYTES) return;
+
+  try {
+    const src = new Uint8Array(frame.data);
+    const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+    const sealed = new Uint8Array(
+      await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, ctx.key, src.subarray(CLEAR_HEADER_BYTES)),
+    );
+
+    const out = new Uint8Array(CLEAR_HEADER_BYTES + sealed.length + IV_BYTES + MAGIC.length);
+    out[0] = src[0];
+    out.set(sealed, CLEAR_HEADER_BYTES);
+    out.set(iv, CLEAR_HEADER_BYTES + sealed.length);
+    out.set(MAGIC, out.length - MAGIC.length);
+    frame.data = out.buffer;
+  } catch {
+    // Never break the call over the cipher; send the frame untouched.
+  }
+}
+
+async function decryptFrame(frame, ctx) {
+  if (!ctx.key) return;
+
+  const src = new Uint8Array(frame.data);
+  const n = src.length;
+  if (n < MIN_ENCRYPTED || src[n - 2] !== MAGIC[0] || src[n - 1] !== MAGIC[1]) return;
+
+  try {
+    const ivStart = n - MAGIC.length - IV_BYTES;
+    // GCM authenticates, so a wrong key throws here instead of emitting noise.
+    const plain = new Uint8Array(
+      await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: src.subarray(ivStart, ivStart + IV_BYTES) },
+        ctx.key,
+        src.subarray(CLEAR_HEADER_BYTES, ivStart),
+      ),
+    );
+
+    const out = new Uint8Array(CLEAR_HEADER_BYTES + plain.length);
+    out[0] = src[0];
+    out.set(plain, CLEAR_HEADER_BYTES);
+    frame.data = out.buffer;
+  } catch {
+    // Wrong key or tampered frame: leave the ciphertext, listener hears static.
+  }
 }

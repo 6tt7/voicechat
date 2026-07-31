@@ -33,7 +33,20 @@ function broadcast(msg, exceptId) {
 
 function publicPeer(id) {
   const peer = peers.get(id);
-  return { id, profile: peer.profile, muted: peer.muted, scrambled: peer.scrambled };
+  return {
+    id,
+    profile: peer.profile,
+    muted: peer.muted,
+    encrypted: peer.encrypted,
+    // Sealed AES session key. Useless to the server: only a holder of the
+    // matching RSA private key can open it.
+    envelope: peer.envelope,
+  };
+}
+
+// A 2048-bit RSA-OAEP ciphertext is 256 bytes, so ~344 base64 characters.
+function sanitizeEnvelope(envelope) {
+  return typeof envelope === 'string' && envelope.length <= 1024 ? envelope : null;
 }
 
 function sanitizeProfile(profile) {
@@ -75,7 +88,8 @@ wss.on('connection', (ws) => {
           ws,
           profile: sanitizeProfile(msg.profile),
           muted: !!msg.muted,
-          scrambled: !!msg.scrambled,
+          encrypted: !!msg.encrypted,
+          envelope: sanitizeEnvelope(msg.envelope),
         });
         // The newcomer gets the roster and is the one who dials everyone already here.
         send(ws, {
@@ -99,7 +113,8 @@ wss.on('connection', (ws) => {
         const peer = peers.get(id);
         if (msg.profile) peer.profile = sanitizeProfile(msg.profile);
         if (typeof msg.muted === 'boolean') peer.muted = msg.muted;
-        if (typeof msg.scrambled === 'boolean') peer.scrambled = msg.scrambled;
+        if (typeof msg.encrypted === 'boolean') peer.encrypted = msg.encrypted;
+        if ('envelope' in msg) peer.envelope = sanitizeEnvelope(msg.envelope);
         broadcast({ type: 'peer-update', peer: publicPeer(id) }, id);
         break;
       }

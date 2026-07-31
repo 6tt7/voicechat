@@ -52,23 +52,50 @@ extend `iceServers` at the top of [public/app.js](public/app.js):
 
 A green ring around an avatar means that person is talking.
 
-## The encrypt (debug) button
+## Encryption
 
-Off by default. Turn it on and your outgoing audio frames are encrypted with AES-CTR using a key
-generated in your tab that is never shared — so **no peer can decrypt it, by design**. Receivers feed
-the raw ciphertext straight into their Opus decoder, which comes out as loud static. Everyone in the
-room sees a 🔒 badge on your avatar while it's on.
+Off by default. Turn it on and your outgoing audio is encrypted with AES-GCM; only people who hold
+your key can hear you, and everyone else gets static. Open **keys** to see your key, copy it, or
+paste someone else's.
 
-You can't hear the effect yourself; your own mic is never played back locally. Open a second tab or
-have someone else listen.
+**RSA does the key exchange, AES does the audio.** RSA cannot encrypt a media stream — a 2048-bit
+key takes at most 190 bytes per operation and is orders of magnitude too slow for 50 frames a
+second. So each session generates a random AES-256 key, seals it with RSA-OAEP, and ships that
+344-character envelope through the signaling server. The server can relay it but never open it.
 
-The one-byte Opus TOC header is left in the clear ([public/voice-cipher.js](public/voice-cipher.js)).
-That's deliberate: encrypt it too and the far-end decoder rejects the frames outright, so you get
-silence and decoder errors instead of anything audible. Frames run through
-[`RTCRtpScriptTransform`](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpScriptTransform) in a
-worker, falling back to Chrome's older `createEncodedStreams`; browsers with neither get the button
-disabled.
+The key shown in the panel is your **RSA private key**. Handing it out is what lets others decrypt
+you. That's inverted from normal RSA use and deliberate: this is a one-to-many broadcast with manual
+key handout, so the key you share has to be the one that opens the envelope. Anyone holding it can
+hear you (and anyone else using that same keypair). The fingerprint under the key is a short SHA-256
+digest — read it aloud to confirm you both have the same key.
 
-This is a debug toy for hearing what undecrypted audio sounds like — not a privacy feature. Real
-end-to-end encryption needs the receiving side to hold the key and decrypt, which is the opposite of
-what this button does.
+Badges: 🔒 amber means encrypted and you can't open it; 🔓 green means encrypted and your key works.
+The panel tells you exactly how many streams your key opens.
+
+### What this does and doesn't give you
+
+Audio is encrypted end to end — the server relays ciphertext and cannot decode it. Frames are
+authenticated (AES-GCM), so a wrong key or a tampered frame is rejected rather than played as noise.
+
+It is **not** a hardened messenger. Keys travel by copy-paste, so anyone who intercepts one has full
+access; there's no forward secrecy (one key covers the whole session) and no identity verification
+beyond reading fingerprints aloud. Note also that WebRTC already encrypts every call with DTLS-SRTP
+in transit — what this adds is that peers without your key can't hear you either.
+
+### Implementation
+
+Frames are transformed via
+[`RTCRtpScriptTransform`](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpScriptTransform) in
+a worker, falling back to Chrome's older `createEncodedStreams`; browsers with neither get the button
+disabled. Wire format is `[opus TOC (1)][ciphertext+tag][iv (12)][magic (2)]`, about 12 kbps of
+overhead.
+
+Two details that are load-bearing, both in [public/voice-cipher.js](public/voice-cipher.js) and
+[public/app.js](public/app.js):
+
+- The one-byte Opus TOC header stays in the clear. Encrypt it too and the far-end decoder rejects
+  frames outright, so listeners without the key get silence and decoder errors instead of static.
+- The decrypt transform is attached as soon as the transceiver exists — right after `addTrack` for
+  the caller, right after `setRemoteDescription` for the answerer. Attaching it in `ontrack` (the
+  obvious place) is too late: Chrome routes no frames through it, and audio stays encrypted while
+  the UI claims otherwise.

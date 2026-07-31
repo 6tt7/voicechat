@@ -1,4 +1,21 @@
-import { cipherSupported, installSenderCipher, pcCipherOptions, setCipherEnabled } from './cipher.js';
+import {
+  cipherSupported,
+  forgetPeer,
+  installReceiverCipher,
+  installSenderCipher,
+  pcCipherOptions,
+  setEncryptionEnabled,
+  setReceiveKey,
+  setSendKey,
+} from './cipher.js';
+import {
+  fingerprint,
+  loadIdentity,
+  newIdentity,
+  openSessionKey,
+  sealSessionKey,
+  validatePrivateKey,
+} from './keys.js';
 
 const ICE = {
   iceServers: [
@@ -19,8 +36,15 @@ let ws = null;
 let myId = null;
 let localStream = null;
 let muted = false;
-let scrambled = false;
+let encrypting = false;
 let reconnectDelay = 1000;
+
+/** Our RSA identity, the AES key it protects, and the envelope peers receive. */
+let identity = null;
+let sessionKeyRaw = null;
+let sessionEnvelope = null;
+/** The private key we were given to listen with, if any. */
+let listenKey = localStorage.getItem('vc-listen-key') || '';
 let audioBlocked = false;
 
 /** id -> { pc, profile, muted, card, stream, meter } */
@@ -98,7 +122,8 @@ function renderPeer(id) {
   paintAvatar(card.querySelector('.avatar'), entry.profile);
   card.querySelector('.name').textContent = entry.profile.name;
   card.classList.toggle('muted', !!entry.muted);
-  card.classList.toggle('scrambled', !!entry.scrambled);
+  card.classList.toggle('encrypted', !!entry.encrypted);
+  card.classList.toggle('unlocked', !!entry.encrypted && !!entry.decrypting);
   $('empty').hidden = peers.size > 1;
 }
 
@@ -109,6 +134,7 @@ function removePeer(id) {
   entry.meter?.stop();
   entry.audioEl?.remove();
   entry.card?.remove();
+  forgetPeer(id);
   peers.delete(id);
   $('empty').hidden = peers.size > 1;
 }
@@ -190,12 +216,16 @@ function connectTo(id, peer, initiator) {
   for (const track of localStream.getTracks()) {
     installSenderCipher(pc.addTrack(track, localStream));
   }
+  // A decrypt transform attached in ontrack is too late — Chrome never routes
+  // frames through it. Attach as soon as the transceiver exists instead.
+  attachReceiveCiphers(pc, id);
 
   pc.onicecandidate = (e) => {
     if (e.candidate) signal(id, { candidate: e.candidate });
   };
 
   pc.ontrack = (e) => {
+    installReceiverCipher(e.receiver, id);
     const stream = e.streams[0];
     const entry = peers.get(id);
     if (!entry || entry.stream === stream) return;
@@ -228,8 +258,35 @@ function connectTo(id, peer, initiator) {
     };
   }
 
+  applyEnvelope(id, peer.envelope);
   renderPeer(id);
   return pc;
+}
+
+/** Attach the decrypt transform to every audio receiver we know about yet. */
+function attachReceiveCiphers(pc, id) {
+  for (const tx of pc.getTransceivers()) {
+    if (tx.receiver) installReceiverCipher(tx.receiver, id);
+  }
+}
+
+/** Try the key we were given against a peer's sealed session key. */
+async function applyEnvelope(id, envelope) {
+  const entry = peers.get(id);
+  if (!entry) return;
+  entry.envelope = envelope || null;
+
+  const raw = envelope && listenKey ? await openSessionKey(envelope, listenKey) : null;
+  entry.decrypting = !!raw;
+  await setReceiveKey(id, raw);
+  renderPeer(id);
+}
+
+async function refreshAllEnvelopes() {
+  for (const [id, entry] of peers) {
+    if (id !== myId) await applyEnvelope(id, entry.envelope);
+  }
+  updateKeyStatus();
 }
 
 async function onSignal(from, data) {
@@ -240,6 +297,8 @@ async function onSignal(from, data) {
   try {
     if (data.sdp) {
       await pc.setRemoteDescription(data.sdp);
+      // The answering side's transceivers only exist now; attach before media flows.
+      attachReceiveCiphers(pc, from);
       for (const c of entry.pending.splice(0)) await pc.addIceCandidate(c);
       if (data.sdp.type === 'offer') {
         await pc.setLocalDescription();
@@ -262,7 +321,9 @@ function connect() {
 
   ws.onopen = () => {
     reconnectDelay = 1000;
-    ws.send(JSON.stringify({ type: 'join', profile, muted, scrambled }));
+    ws.send(JSON.stringify({
+      type: 'join', profile, muted, encrypted: encrypting, envelope: sessionEnvelope,
+    }));
   };
 
   ws.onmessage = async (e) => {
@@ -270,18 +331,20 @@ function connect() {
     switch (msg.type) {
       case 'welcome': {
         myId = msg.id;
-        peers.set(myId, { profile, muted, scrambled });
+        peers.set(myId, { profile, muted, encrypted: encrypting });
         renderPeer(myId);
         watchSpeaking(myId, localStream);
         setStatus(msg.peers.length ? 'connected' : 'connected — waiting for others', 'live');
         // We just arrived, so we dial everyone already in the room.
         for (const p of msg.peers) connectTo(p.id, p, true);
+        updateKeyStatus();
         break;
       }
       case 'peer-join':
         // They will dial us; just hold a connection ready to answer.
         connectTo(msg.peer.id, msg.peer, false);
         setStatus('connected', 'live');
+        updateKeyStatus();
         break;
       case 'peer-leave':
         removePeer(msg.id);
@@ -291,7 +354,8 @@ function connect() {
         if (entry) {
           entry.profile = msg.peer.profile;
           entry.muted = msg.peer.muted;
-          entry.scrambled = msg.peer.scrambled;
+          entry.encrypted = msg.peer.encrypted;
+          await applyEnvelope(msg.peer.id, msg.peer.envelope);
           renderPeer(msg.peer.id);
         }
         break;
@@ -317,13 +381,15 @@ function connect() {
 
 function pushUpdate() {
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'update', profile, muted, scrambled }));
+    ws.send(JSON.stringify({
+      type: 'update', profile, muted, encrypted: encrypting, envelope: sessionEnvelope,
+    }));
   }
   const me = peers.get(myId);
   if (me) {
     me.profile = profile;
     me.muted = muted;
-    me.scrambled = scrambled;
+    me.encrypted = encrypting;
     renderPeer(myId);
   }
 }
@@ -354,23 +420,108 @@ $('unblock').onclick = async () => {
 
 $('muteBtn').onclick = () => setMuted(!muted);
 
-/* Debug: encrypt outgoing audio with a key nobody else has, so peers decode the
-   raw ciphertext as static. Off by default; nothing here is a privacy feature. */
-function setScrambled(next) {
-  scrambled = next;
-  setCipherEnabled(scrambled);
-  $('scrambleBtn').classList.toggle('on', scrambled);
-  $('scrambleLabel').textContent = scrambled ? 'encrypted: on' : 'encrypt (debug)';
-  $('debugNote').hidden = !scrambled;
+/* Encryption. Off by default. When on, outgoing audio is AES-GCM encrypted under
+   a session key that RSA-OAEP seals to our identity; only listeners holding our
+   private key can open it. Everyone else hears static. */
+function setEncrypting(next) {
+  encrypting = next;
+  setEncryptionEnabled(encrypting);
+  $('encryptBtn').classList.toggle('on', encrypting);
+  $('encryptLabel').textContent = encrypting ? 'encryption: on' : 'encryption: off';
+  $('encryptNote').hidden = !encrypting;
   pushUpdate();
 }
 
 if (!cipherSupported) {
-  $('scrambleBtn').disabled = true;
-  $('scrambleBtn').title = 'This browser has no encoded-transform support';
+  $('encryptBtn').disabled = true;
+  $('encryptBtn').title = 'This browser has no encoded-transform support';
 }
 
-$('scrambleBtn').onclick = () => setScrambled(!scrambled);
+$('encryptBtn').onclick = () => setEncrypting(!encrypting);
+
+/* key panel */
+
+const keySheet = $('keySheet');
+
+function updateKeyStatus() {
+  const heard = [...peers].filter(([id, p]) => id !== myId && p.encrypted).length;
+  const open = [...peers].filter(([id, p]) => id !== myId && p.encrypted && p.decrypting).length;
+  const el = $('keyStatus');
+
+  if (!listenKey) {
+    el.textContent = heard
+      ? `${heard} encrypted ${heard === 1 ? 'person' : 'people'} in the room — paste their key to hear them`
+      : 'no key set — encrypted people will sound like static';
+    el.className = 'key-status';
+  } else if (!heard) {
+    el.textContent = 'key loaded — nobody is encrypting right now';
+    el.className = 'key-status ok';
+  } else {
+    el.textContent = `key opens ${open} of ${heard} encrypted ${heard === 1 ? 'stream' : 'streams'}`;
+    el.className = open ? 'key-status ok' : 'key-status bad';
+  }
+}
+
+async function showIdentity() {
+  $('myKey').value = identity.privateKey;
+  $('myKeyPrint').textContent = await fingerprint(identity.publicKey);
+  $('listenInput').value = listenKey;
+  updateKeyStatus();
+}
+
+$('keyBtn').onclick = async () => {
+  await showIdentity();
+  keySheet.hidden = false;
+};
+
+$('keyDoneBtn').onclick = () => { keySheet.hidden = true; };
+keySheet.onclick = (e) => { if (e.target === keySheet) keySheet.hidden = true; };
+
+$('copyKeyBtn').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(identity.privateKey);
+    $('copyKeyLabel').textContent = 'copied!';
+  } catch {
+    $('myKey').select();
+    $('copyKeyLabel').textContent = 'press Ctrl+C';
+  }
+  setTimeout(() => ($('copyKeyLabel').textContent = 'copy key'), 1800);
+};
+
+$('newKeyBtn').onclick = async () => {
+  identity = await newIdentity();
+  await rotateSessionKey();
+  await showIdentity();
+  pushUpdate();
+};
+
+$('listenBtn').onclick = async () => {
+  const text = $('listenInput').value.trim();
+  if (text && !(await validatePrivateKey(text))) {
+    $('keyStatus').textContent = "that doesn't look like an RSA private key";
+    $('keyStatus').className = 'key-status bad';
+    return;
+  }
+  listenKey = text;
+  try {
+    localStorage.setItem('vc-listen-key', listenKey);
+  } catch { /* not persisted */ }
+  await refreshAllEnvelopes();
+};
+
+$('clearListenBtn').onclick = async () => {
+  listenKey = '';
+  $('listenInput').value = '';
+  localStorage.removeItem('vc-listen-key');
+  await refreshAllEnvelopes();
+};
+
+/** New AES session key, sealed to our own public key for listeners to open. */
+async function rotateSessionKey() {
+  sessionKeyRaw = crypto.getRandomValues(new Uint8Array(32));
+  sessionEnvelope = await sealSessionKey(sessionKeyRaw, identity.publicKey);
+  await setSendKey(sessionKeyRaw);
+}
 
 document.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'm' && !$('sheet').contains(document.activeElement)) {
@@ -476,6 +627,10 @@ function squareThumbnail(file, size) {
     setStatus('microphone blocked — allow it and reload', 'error');
     return;
   }
+  setStatus('preparing keys…');
+  identity = await loadIdentity();
+  await rotateSessionKey();
+
   setStatus('connecting…');
   connect();
   // Any interaction is a chance to un-suspend audio if the browser held it back.
