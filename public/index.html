@@ -71,14 +71,18 @@
       <span class="control-icon" aria-hidden="true">⌁</span>
       <span>Audio</span>
     </button>
-    <button id="scrambleBtn" class="control btn debug" title="Debug: encrypt your outgoing audio and let peers play the ciphertext">
+    <button id="encryptBtn" class="control btn debug" title="Encrypt outgoing audio; only listeners holding your key can hear it">
       <span class="control-icon ico" aria-hidden="true">🔒</span>
-      <span id="scrambleLabel">encrypt (debug)</span>
+      <span id="encryptLabel">Encryption off</span>
+    </button>
+    <button id="keyBtn" class="control btn key-control" title="Manage encryption keys">
+      <span class="control-icon ico" aria-hidden="true">🔑</span>
+      <span>Keys</span>
     </button>
   </footer>
 
-  <p class="debug-note" id="debugNote" hidden>
-    your voice is encrypted with a key nobody has — everyone else hears static, and you can't hear it yourself
+  <p class="debug-note" id="encryptNote" hidden>
+    your voice is encrypted — only people who paste your key can hear it
   </p>
 
   <div class="sheet" id="profileSheet" hidden>
@@ -159,6 +163,37 @@
         </p>
       </div>
       <button class="wide-action" id="securityDoneBtn">Got it</button>
+    </section>
+  </div>
+
+  <div class="sheet" id="keySheet" hidden>
+    <section class="sheet-card key-card" role="dialog" aria-modal="true" aria-labelledby="keyTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="dialog-kicker">encryption</p>
+          <h2 id="keyTitle">Your listening keys</h2>
+        </div>
+        <button class="close-btn" id="keyCloseBtn" aria-label="Close encryption keys">×</button>
+      </div>
+
+      <label class="field-label" for="myKey">Your key</label>
+      <p class="key-help">Share this only with people you want to hear your encrypted voice.</p>
+      <textarea id="myKey" class="keybox" readonly spellcheck="false"></textarea>
+      <div class="key-actions">
+        <button class="pill-btn" id="copyKeyBtn"><span id="copyKeyLabel">Copy key</span></button>
+        <button class="pill-btn" id="newKeyBtn">Make new key</button>
+        <span class="key-print">fingerprint <code id="myKeyPrint">…</code></span>
+      </div>
+
+      <label class="field-label key-listen-label" for="listenInput">Hear someone encrypted</label>
+      <p class="key-help">Paste the key they sent you.</p>
+      <textarea id="listenInput" class="keybox" spellcheck="false" placeholder="paste an RSA private key"></textarea>
+      <div class="key-actions">
+        <button class="pill-btn" id="listenBtn">Listen</button>
+        <button class="pill-btn" id="clearListenBtn">Clear</button>
+      </div>
+      <p class="key-status" id="keyStatus" role="status"></p>
+      <button class="wide-action" id="keyDoneBtn">Done</button>
     </section>
   </div>
 

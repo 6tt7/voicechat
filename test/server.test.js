@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
-import { createVoiceChatServer, sanitizeProfile } from '../server.js';
+import { createVoiceChatServer, sanitizeEnvelope, sanitizeProfile } from '../server.js';
 
 class TestClient {
   constructor(socket) {
@@ -72,6 +72,8 @@ test('sanitizeProfile applies public profile limits and defaults', () => {
   assert.equal(profile.color, '#46d39a');
   assert.equal(profile.emoji, '🐸e');
   assert.equal(sanitizeProfile(null).name, 'guest');
+  assert.equal(sanitizeEnvelope('sealed-key'), 'sealed-key');
+  assert.equal(sanitizeEnvelope('x'.repeat(1025)), null);
 });
 
 test('serves the WebAssembly client and redesigned shell', async (t) => {
@@ -96,7 +98,11 @@ test('serves the WebAssembly client and redesigned shell', async (t) => {
 
   const cipher = await fetch(`${voiceChat.httpUrl}/voice-cipher.js`);
   assert.equal(cipher.status, 200);
-  assert.match(await cipher.text(), /AES-CTR/);
+  assert.match(await cipher.text(), /AES-GCM/);
+
+  const keys = await fetch(`${voiceChat.httpUrl}/keys.js`);
+  assert.equal(keys.status, 200);
+  assert.match(await keys.text(), /RSA-OAEP/);
 });
 
 test('joins peers, sanitizes updates, relays signaling, and announces departures', async (t) => {
@@ -123,26 +129,30 @@ test('joins peers, sanitizes updates, relays signaling, and announces departures
     type: 'join',
     profile: { name: 'second', color: '#445566', emoji: '🐸' },
     muted: true,
-    scrambled: true,
+    encrypted: true,
+    envelope: 'sealed-session-key',
   });
   const secondWelcome = await second.next('welcome');
   assert.equal(secondWelcome.peers.length, 1);
   assert.equal(secondWelcome.peers[0].id, firstWelcome.id);
   const secondJoin = await first.next('peer-join');
   assert.equal(secondJoin.peer.id, secondWelcome.id);
-  assert.equal(secondJoin.peer.scrambled, true);
+  assert.equal(secondJoin.peer.encrypted, true);
+  assert.equal(secondJoin.peer.envelope, 'sealed-session-key');
 
   second.send({
     type: 'update',
     profile: { name: '  renamed  ', color: 'invalid', emoji: '🐙' },
     muted: false,
-    scrambled: false,
+    encrypted: false,
+    envelope: 'next-envelope',
   });
   const update = await first.next('peer-update');
   assert.equal(update.peer.profile.name, 'renamed');
   assert.equal(update.peer.profile.color, '#46d39a');
   assert.equal(update.peer.muted, false);
-  assert.equal(update.peer.scrambled, false);
+  assert.equal(update.peer.encrypted, false);
+  assert.equal(update.peer.envelope, 'next-envelope');
 
   second.send({ type: 'signal', to: firstWelcome.id, data: { candidate: 'ice-test' } });
   const signal = await first.next('signal');

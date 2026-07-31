@@ -30,7 +30,9 @@ struct Peer {
   std::string id;
   Profile profile;
   bool muted = false;
-  bool scrambled = false;
+  bool encrypted = false;
+  bool decrypting = false;
+  std::string envelope;
   double volume = 1.0;
   val pc = val::undefined();
   val card = val::undefined();
@@ -54,6 +56,8 @@ val mathObject = val::global("Math");
 val ws = val::undefined();
 val localStream = val::undefined();
 val audioContext = val::undefined();
+val identity = val::undefined();
+val sessionKeyRaw = val::undefined();
 
 std::unordered_map<std::string, std::unique_ptr<Peer>> peers;
 std::string myId;
@@ -63,10 +67,13 @@ bool muted = false;
 bool manualMuted = false;
 bool pushToTalk = false;
 bool pushPressed = false;
-bool scrambled = false;
+bool encrypting = false;
 bool audioBlocked = false;
 bool micFallbackTried = false;
+bool microphoneReady = false;
 int reconnectDelay = 1000;
+std::string sessionEnvelope;
+std::string listenKey;
 
 const std::vector<std::string> emojis = {
   "🦊", "🐼", "🐸", "🐙", "🦉", "🐝", "🦄", "🐺", "🐳", "🦕", "🐢", "🦋",
@@ -108,6 +115,8 @@ val callback(const char* name) {
 val callback(const char* name, const std::string& firstArgument) {
   return val::module_property(name).call<val>("bind", val::undefined(), firstArgument);
 }
+
+void showIdentity();
 
 template <typename T>
 const T& pick(const std::vector<T>& options) {
@@ -178,6 +187,8 @@ void loadSettings() {
   if (present(savedMic)) preferredMic = savedMic.as<std::string>();
   val savedPtt = storage.call<val>("getItem", js("vc-push-to-talk"));
   pushToTalk = present(savedPtt) && savedPtt.as<std::string>() == "true";
+  val savedListenKey = storage.call<val>("getItem", js("vc-listen-key"));
+  if (present(savedListenKey)) listenKey = savedListenKey.as<std::string>();
   muted = pushToTalk;
 }
 
@@ -272,7 +283,8 @@ void renderPeer(const std::string& id) {
   paintAvatar(card.call<val>("querySelector", js(".avatar")), peer->profile);
   card.call<val>("querySelector", js(".name")).set("textContent", peer->profile.name);
   card["classList"].call<void>("toggle", js("muted"), peer->muted);
-  card["classList"].call<void>("toggle", js("scrambled"), peer->scrambled);
+  card["classList"].call<void>("toggle", js("encrypted"), peer->encrypted);
+  card["classList"].call<void>("toggle", js("unlocked"), peer->encrypted && peer->decrypting);
   if (present(peer->volumeInput)) {
     peer->volumeInput.call<void>(
       "setAttribute",
@@ -281,6 +293,69 @@ void renderPeer(const std::string& id) {
     );
   }
   updateRoomCount();
+}
+
+void updateKeyStatus() {
+  int encryptedPeers = 0;
+  int openPeers = 0;
+  for (const auto& [id, peer] : peers) {
+    if (id == myId || !peer->encrypted) continue;
+    ++encryptedPeers;
+    if (peer->decrypting) ++openPeers;
+  }
+
+  val status = byId("keyStatus");
+  if (listenKey.empty()) {
+    status.set(
+      "textContent",
+      encryptedPeers
+        ? "Paste their key to hear " + std::to_string(encryptedPeers) + " encrypted stream(s)."
+        : js("No listening key set.")
+    );
+    status.set("className", js("key-status"));
+  } else if (!encryptedPeers) {
+    status.set("textContent", js("Key loaded. Nobody else is encrypting."));
+    status.set("className", js("key-status ok"));
+  } else {
+    status.set(
+      "textContent",
+      "Key opens " + std::to_string(openPeers) + " of "
+        + std::to_string(encryptedPeers) + " encrypted stream(s)."
+    );
+    status.set("className", openPeers ? js("key-status ok") : js("key-status bad"));
+  }
+}
+
+void onEnvelopeOpened(const std::string& id, val raw) {
+  Peer* peer = peerFor(id);
+  if (!peer) return;
+  peer->decrypting = present(raw);
+  val cipher = val::global("voiceCipher");
+  if (present(cipher)) cipher.call<val>("setReceiveKey", id, raw);
+  renderPeer(id);
+  updateKeyStatus();
+}
+
+void applyEnvelope(const std::string& id, const std::string& envelope) {
+  Peer* peer = peerFor(id);
+  if (!peer) return;
+  peer->envelope = envelope;
+  if (envelope.empty() || listenKey.empty()) {
+    onEnvelopeOpened(id, val::null());
+    return;
+  }
+  val keys = val::global("voiceKeys");
+  keys.call<val>("openSessionKey", envelope, listenKey)
+    .call<val>("then", callback("onEnvelopeOpened", id));
+}
+
+void refreshAllEnvelopes() {
+  std::vector<std::pair<std::string, std::string>> envelopes;
+  for (const auto& [id, peer] : peers) {
+    if (id != myId) envelopes.emplace_back(id, peer->envelope);
+  }
+  for (const auto& [id, envelope] : envelopes) applyEnvelope(id, envelope);
+  updateKeyStatus();
 }
 
 void stopMeter(Peer& peer) {
@@ -301,8 +376,11 @@ void removePeer(const std::string& id) {
   stopMeter(peer);
   if (present(peer.audioElement)) peer.audioElement.call<void>("remove");
   if (present(peer.card)) peer.card.call<void>("remove");
+  val cipher = val::global("voiceCipher");
+  if (present(cipher)) cipher.call<void>("forgetPeer", id);
   peers.erase(found);
   updateRoomCount();
+  updateKeyStatus();
 }
 
 void showUnblock() {
@@ -428,9 +506,24 @@ void onNegotiationNeeded(const std::string& id) {
     .call<val>("catch", callback("warnPromise"));
 }
 
+void attachReceiveCiphers(const std::string& id) {
+  Peer* peer = peerFor(id);
+  if (!peer || !present(peer->pc)) return;
+  val transceivers = peer->pc.call<val>("getTransceivers");
+  val cipher = val::global("voiceCipher");
+  for (int i = 0; i < transceivers["length"].as<int>(); ++i) {
+    val receiver = transceivers[i]["receiver"];
+    if (present(receiver) && present(cipher)) {
+      cipher.call<void>("installReceiverCipher", receiver, id);
+    }
+  }
+}
+
 void onRemoteDescriptionSet(const std::string& id, bool offer) {
   Peer* peer = peerFor(id);
   if (!peer) return;
+  // Chrome must see the decrypt transform before media starts flowing.
+  attachReceiveCiphers(id);
   for (const val& candidate : peer->pendingCandidates) {
     peer->pc.call<val>("addIceCandidate", candidate);
   }
@@ -474,6 +567,10 @@ void onSignal(const std::string& from, const val& data) {
 void onTrack(const std::string& id, val event) {
   Peer* peer = peerFor(id);
   if (!peer) return;
+  val cipher = val::global("voiceCipher");
+  if (present(cipher) && present(event["receiver"])) {
+    cipher.call<void>("installReceiverCipher", event["receiver"], id);
+  }
   val streams = event["streams"];
   if (streams["length"].as<int>() == 0) return;
   val stream = streams[0];
@@ -564,7 +661,8 @@ void connectTo(const std::string& id, const val& publicPeer, bool initiator) {
   auto entry = std::make_unique<Peer>(id);
   entry->profile = profileFromValue(publicPeer["profile"]);
   entry->muted = publicPeer["muted"].as<bool>();
-  entry->scrambled = present(publicPeer["scrambled"]) && publicPeer["scrambled"].as<bool>();
+  entry->encrypted = present(publicPeer["encrypted"]) && publicPeer["encrypted"].as<bool>();
+  entry->envelope = stringProperty(publicPeer, "envelope");
   Peer& peer = *entry;
   peers.emplace(id, std::move(entry));
 
@@ -576,6 +674,7 @@ void connectTo(const std::string& id, const val& publicPeer, bool initiator) {
     val cipher = val::global("voiceCipher");
     if (present(cipher)) cipher.call<void>("installSenderCipher", sender);
   }
+  attachReceiveCiphers(id);
 
   peer.pc.set("onicecandidate", callback("onIceCandidate", id));
   peer.pc.set("ontrack", callback("onTrack", id));
@@ -583,6 +682,7 @@ void connectTo(const std::string& id, const val& publicPeer, bool initiator) {
   if (initiator) {
     peer.pc.set("onnegotiationneeded", callback("onNegotiationNeeded", id));
   }
+  applyEnvelope(id, peer.envelope);
   renderPeer(id);
 }
 
@@ -622,14 +722,15 @@ void pushUpdate() {
   message.set("type", js("update"));
   message.set("profile", profileValue(profile));
   message.set("muted", muted);
-  message.set("scrambled", scrambled);
+  message.set("encrypted", encrypting);
+  message.set("envelope", sessionEnvelope.empty() ? val::null() : val(sessionEnvelope));
   sendValue(message);
 
   Peer* self = peerFor(myId);
   if (self) {
     self->profile = profile;
     self->muted = muted;
-    self->scrambled = scrambled;
+    self->encrypted = encrypting;
     renderPeer(myId);
   }
 }
@@ -654,7 +755,8 @@ void onWsOpen(val) {
   message.set("type", js("join"));
   message.set("profile", profileValue(profile));
   message.set("muted", muted);
-  message.set("scrambled", scrambled);
+  message.set("encrypted", encrypting);
+  message.set("envelope", sessionEnvelope.empty() ? val::null() : val(sessionEnvelope));
   sendValue(message);
 }
 
@@ -666,7 +768,7 @@ void onWsMessage(val event) {
     auto self = std::make_unique<Peer>(myId);
     self->profile = profile;
     self->muted = muted;
-    self->scrambled = scrambled;
+    self->encrypted = encrypting;
     Peer& selfReference = *self;
     peers.emplace(myId, std::move(self));
     renderPeer(myId);
@@ -679,6 +781,7 @@ void onWsMessage(val event) {
       val publicPeer = roster[i];
       connectTo(stringProperty(publicPeer, "id"), publicPeer, true);
     }
+    updateKeyStatus();
   } else if (type == "peer-join") {
     val publicPeer = message["peer"];
     connectTo(stringProperty(publicPeer, "id"), publicPeer, false);
@@ -692,7 +795,8 @@ void onWsMessage(val event) {
     if (peer) {
       peer->profile = profileFromValue(publicPeer["profile"]);
       peer->muted = publicPeer["muted"].as<bool>();
-      peer->scrambled = present(publicPeer["scrambled"]) && publicPeer["scrambled"].as<bool>();
+      peer->encrypted = present(publicPeer["encrypted"]) && publicPeer["encrypted"].as<bool>();
+      applyEnvelope(peer->id, stringProperty(publicPeer, "envelope"));
       renderPeer(peer->id);
     }
   } else if (type == "signal") {
@@ -757,13 +861,66 @@ void requestInitialMicrophone(const std::string& deviceId) {
 
 void populateMicrophones();
 
+void onSessionEnvelope(val envelope) {
+  sessionEnvelope = envelope.as<std::string>();
+  if (microphoneReady && !present(ws)) {
+    setStatus("connecting…");
+    connectSocket();
+  } else if (present(ws)) {
+    pushUpdate();
+    showIdentity();
+    setStatus("connected", "live");
+  } else {
+    showIdentity();
+  }
+}
+
+void onSendKeyInstalled(val) {
+  val::global("voiceKeys").call<val>(
+    "sealSessionKey",
+    sessionKeyRaw,
+    stringProperty(identity, "publicKey")
+  ).call<val>("then", callback("onSessionEnvelope"))
+    .call<val>("catch", callback("warnPromise"));
+}
+
+void rotateSessionKey() {
+  sessionKeyRaw = val::global("crypto").call<val>(
+    "getRandomValues",
+    val::global("Uint8Array").new_(32)
+  );
+  val::global("voiceCipher").call<val>("setSendKey", sessionKeyRaw)
+    .call<val>("then", callback("onSendKeyInstalled"))
+    .call<val>("catch", callback("warnPromise"));
+}
+
+void onIdentityReady(val loadedIdentity) {
+  identity = loadedIdentity;
+  rotateSessionKey();
+}
+
+void onNewIdentity(val loadedIdentity) {
+  identity = loadedIdentity;
+  setStatus("rotating encryption key…");
+  rotateSessionKey();
+}
+
+void makeNewKey(val) {
+  val::global("voiceKeys").call<val>("newIdentity")
+    .call<val>("then", callback("onNewIdentity"))
+    .call<val>("catch", callback("warnPromise"));
+}
+
 void onInitialMicReady(val stream) {
   localStream = stream;
+  microphoneReady = true;
   val tracks = localStream.call<val>("getAudioTracks");
   for (int i = 0; i < tracks["length"].as<int>(); ++i) tracks[i].set("enabled", !muted);
-  setStatus("connecting…");
+  setStatus("preparing keys…");
   populateMicrophones();
-  connectSocket();
+  val::global("voiceKeys").call<val>("loadIdentity")
+    .call<val>("then", callback("onIdentityReady"))
+    .call<val>("catch", callback("warnPromise"));
 }
 
 void onInitialMicError(val) {
@@ -982,24 +1139,102 @@ void onPushToTalkToggle(val event) {
   syncAudioState();
 }
 
-void updateScrambleUi() {
-  val button = byId("scrambleBtn");
-  button["classList"].call<void>("toggle", js("on"), scrambled);
-  button.call<void>("setAttribute", js("aria-pressed"), scrambled ? js("true") : js("false"));
-  byId("scrambleLabel").set(
-    "textContent",
-    scrambled ? js("encrypted: on") : js("encrypt (debug)")
-  );
-  byId("debugNote").set("hidden", !scrambled);
+void updateEncryptionUi() {
+  val button = byId("encryptBtn");
+  button["classList"].call<void>("toggle", js("on"), encrypting);
+  button.call<void>("setAttribute", js("aria-pressed"), encrypting ? js("true") : js("false"));
+  byId("encryptLabel").set("textContent", encrypting ? js("Encryption on") : js("Encryption off"));
+  byId("encryptNote").set("hidden", !encrypting);
 }
 
-void onScrambleClick(val) {
+void onEncryptClick(val) {
   val cipher = val::global("voiceCipher");
   if (!present(cipher) || !cipher["cipherSupported"].as<bool>()) return;
-  scrambled = !scrambled;
-  cipher.call<void>("setCipherEnabled", scrambled);
-  updateScrambleUi();
+  encrypting = !encrypting;
+  cipher.call<void>("setEncryptionEnabled", encrypting);
+  updateEncryptionUi();
   pushUpdate();
+}
+
+void onFingerprint(val fingerprintValue) {
+  byId("myKeyPrint").set("textContent", fingerprintValue);
+}
+
+void showIdentity() {
+  if (!present(identity)) return;
+  byId("myKey").set("value", stringProperty(identity, "privateKey"));
+  byId("listenInput").set("value", listenKey);
+  val::global("voiceKeys").call<val>(
+    "fingerprint",
+    stringProperty(identity, "publicKey")
+  ).call<val>("then", callback("onFingerprint"));
+  updateKeyStatus();
+}
+
+void openKeys(val) {
+  showIdentity();
+  byId("keySheet").set("hidden", false);
+  byId("keyCloseBtn").call<void>("focus");
+}
+
+void closeKeys(val) {
+  byId("keySheet").set("hidden", true);
+}
+
+void keyCopyReset(void*) {
+  byId("copyKeyLabel").set("textContent", js("Copy key"));
+}
+
+void onKeyCopySuccess(val = val::undefined()) {
+  byId("copyKeyLabel").set("textContent", js("Copied!"));
+  emscripten_async_call(keyCopyReset, nullptr, 1500);
+}
+
+void onKeyCopyFallback(val = val::undefined()) {
+  byId("myKey").call<void>("select");
+  byId("copyKeyLabel").set("textContent", js("Press Ctrl+C"));
+  emscripten_async_call(keyCopyReset, nullptr, 1800);
+}
+
+void copyKey(val) {
+  if (!present(identity)) return;
+  val clipboard = navigatorObject["clipboard"];
+  if (present(clipboard) && present(clipboard["writeText"])) {
+    clipboard.call<val>("writeText", stringProperty(identity, "privateKey"))
+      .call<val>("then", callback("onKeyCopySuccess"))
+      .call<val>("catch", callback("onKeyCopyFallback"));
+  } else {
+    onKeyCopyFallback();
+  }
+}
+
+void onListenValidated(val valid) {
+  const std::string candidate = byId("listenInput")["value"].as<std::string>();
+  if (!valid.as<bool>()) {
+    byId("keyStatus").set("textContent", js("That is not a valid RSA private key."));
+    byId("keyStatus").set("className", js("key-status bad"));
+    return;
+  }
+  listenKey = candidate;
+  windowObject["localStorage"].call<void>("setItem", js("vc-listen-key"), listenKey);
+  refreshAllEnvelopes();
+}
+
+void listenWithKey(val) {
+  const std::string candidate = byId("listenInput")["value"].as<std::string>();
+  if (candidate.empty()) {
+    onListenValidated(val(true));
+    return;
+  }
+  val::global("voiceKeys").call<val>("validatePrivateKey", candidate)
+    .call<val>("then", callback("onListenValidated"));
+}
+
+void clearListenKey(val) {
+  listenKey.clear();
+  byId("listenInput").set("value", std::string());
+  windowObject["localStorage"].call<void>("removeItem", js("vc-listen-key"));
+  refreshAllEnvelopes();
 }
 
 void onMuteClick(val) {
@@ -1042,6 +1277,7 @@ void onKeyDown(val event) {
     closeProfile(val::undefined());
     closeSettings(val::undefined());
     closeSecurity(val::undefined());
+    closeKeys(val::undefined());
   }
 }
 
@@ -1127,7 +1363,19 @@ void bindEvents() {
     callback("onOverlayClick", "settingsSheet")
   );
 
-  byId("scrambleBtn").call<void>("addEventListener", js("click"), callback("onScrambleClick"));
+  byId("encryptBtn").call<void>("addEventListener", js("click"), callback("onEncryptClick"));
+  byId("keyBtn").call<void>("addEventListener", js("click"), callback("openKeys"));
+  byId("keyCloseBtn").call<void>("addEventListener", js("click"), callback("closeKeys"));
+  byId("keyDoneBtn").call<void>("addEventListener", js("click"), callback("closeKeys"));
+  byId("copyKeyBtn").call<void>("addEventListener", js("click"), callback("copyKey"));
+  byId("newKeyBtn").call<void>("addEventListener", js("click"), callback("makeNewKey"));
+  byId("listenBtn").call<void>("addEventListener", js("click"), callback("listenWithKey"));
+  byId("clearListenBtn").call<void>("addEventListener", js("click"), callback("clearListenKey"));
+  byId("keySheet").call<void>(
+    "addEventListener",
+    js("click"),
+    callback("onOverlayClick", "keySheet")
+  );
 
   byId("securityBtn").call<void>("addEventListener", js("click"), callback("openSecurity"));
   byId("securityCloseBtn").call<void>("addEventListener", js("click"), callback("closeSecurity"));
@@ -1161,11 +1409,11 @@ void startClient() {
   loadSettings();
   bindEvents();
   updateMuteUi();
-  updateScrambleUi();
+  updateEncryptionUi();
 
   val cipher = val::global("voiceCipher");
   if (!present(cipher) || !cipher["cipherSupported"].as<bool>()) {
-    val button = byId("scrambleBtn");
+    val button = byId("encryptBtn");
     button.set("disabled", true);
     button.set("title", js("This browser has no encoded-transform support"));
   }
@@ -1191,6 +1439,7 @@ EMSCRIPTEN_BINDINGS(voicechat_client) {
   emscripten::function("onRemoteOfferSet", &onRemoteOfferSet);
   emscripten::function("onRemoteAnswerSet", &onRemoteAnswerSet);
   emscripten::function("onTrack", &onTrack);
+  emscripten::function("onEnvelopeOpened", &onEnvelopeOpened);
   emscripten::function("onSecurityDigest", &onSecurityDigest);
   emscripten::function("onSecurityStats", &onSecurityStats);
   emscripten::function("onConnectionStateChange", &onConnectionStateChange);
@@ -1201,6 +1450,11 @@ EMSCRIPTEN_BINDINGS(voicechat_client) {
   emscripten::function("onWsError", &onWsError);
   emscripten::function("onInitialMicReady", &onInitialMicReady);
   emscripten::function("onInitialMicError", &onInitialMicError);
+  emscripten::function("onSessionEnvelope", &onSessionEnvelope);
+  emscripten::function("onSendKeyInstalled", &onSendKeyInstalled);
+  emscripten::function("onIdentityReady", &onIdentityReady);
+  emscripten::function("onNewIdentity", &onNewIdentity);
+  emscripten::function("makeNewKey", &makeNewKey);
   emscripten::function("onDevices", &onDevices);
   emscripten::function("populateMicrophones", &populateMicrophones);
   emscripten::function("onMicChanged", &onMicChanged);
@@ -1218,7 +1472,16 @@ EMSCRIPTEN_BINDINGS(voicechat_client) {
   emscripten::function("openSecurity", &openSecurity);
   emscripten::function("closeSecurity", &closeSecurity);
   emscripten::function("onPushToTalkToggle", &onPushToTalkToggle);
-  emscripten::function("onScrambleClick", &onScrambleClick);
+  emscripten::function("onEncryptClick", &onEncryptClick);
+  emscripten::function("onFingerprint", &onFingerprint);
+  emscripten::function("openKeys", &openKeys);
+  emscripten::function("closeKeys", &closeKeys);
+  emscripten::function("onKeyCopySuccess", &onKeyCopySuccess);
+  emscripten::function("onKeyCopyFallback", &onKeyCopyFallback);
+  emscripten::function("copyKey", &copyKey);
+  emscripten::function("onListenValidated", &onListenValidated);
+  emscripten::function("listenWithKey", &listenWithKey);
+  emscripten::function("clearListenKey", &clearListenKey);
   emscripten::function("onMuteClick", &onMuteClick);
   emscripten::function("onMutePointerDown", &onMutePointerDown);
   emscripten::function("onKeyDown", &onKeyDown);

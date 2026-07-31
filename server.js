@@ -24,6 +24,10 @@ export function sanitizeProfile(profile) {
   return { name: name || 'guest', avatar, color, emoji };
 }
 
+export function sanitizeEnvelope(envelope) {
+  return typeof envelope === 'string' && envelope.length <= 1024 ? envelope : null;
+}
+
 export function createVoiceChatServer({
   maxPeers = positiveInteger(process.env.MAX_PEERS, 12),
   publicDir = path.join(dirname, 'public'),
@@ -59,7 +63,7 @@ export function createVoiceChatServer({
   // 512KB is plenty for SDP plus a downscaled avatar data URL.
   const wss = new WebSocketServer({ server, maxPayload: 512 * 1024 });
 
-  /** The single channel. id -> { ws, profile, muted, scrambled } */
+  /** The single channel. id -> { ws, profile, muted, encrypted, envelope } */
   const peers = new Map();
 
   function send(ws, msg) {
@@ -78,7 +82,9 @@ export function createVoiceChatServer({
       id,
       profile: peer.profile,
       muted: peer.muted,
-      scrambled: peer.scrambled,
+      encrypted: peer.encrypted,
+      // The server can relay this RSA-OAEP envelope but cannot open it.
+      envelope: peer.envelope,
     };
   }
 
@@ -110,7 +116,8 @@ export function createVoiceChatServer({
             ws,
             profile: sanitizeProfile(msg.profile),
             muted: !!msg.muted,
-            scrambled: !!msg.scrambled,
+            encrypted: !!msg.encrypted,
+            envelope: sanitizeEnvelope(msg.envelope),
           });
           // The newcomer gets the roster and is the one who dials everyone already here.
           send(ws, {
@@ -134,7 +141,8 @@ export function createVoiceChatServer({
           const peer = peers.get(id);
           if (msg.profile) peer.profile = sanitizeProfile(msg.profile);
           if (typeof msg.muted === 'boolean') peer.muted = msg.muted;
-          if (typeof msg.scrambled === 'boolean') peer.scrambled = msg.scrambled;
+          if (typeof msg.encrypted === 'boolean') peer.encrypted = msg.encrypted;
+          if ('envelope' in msg) peer.envelope = sanitizeEnvelope(msg.envelope);
           broadcast({ type: 'peer-update', peer: publicPeer(id) }, id);
           break;
         }

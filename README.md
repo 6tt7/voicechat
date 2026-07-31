@@ -49,11 +49,12 @@ This compiles [`src/client.cpp`](src/client.cpp) into:
 - `public/voicechat-runtime.wasm` — the native WebAssembly module
 - `public/voicechat-runtime.js` — generated Emscripten bindings
 
-`public/boot.js` loads the module and bridges the owner's encoded-audio debug cipher into C++.
+`public/boot.js` loads the module and bridges the owner's encoded-audio cipher and RSA key exchange
+into C++.
 WebRTC, media devices, Web Audio, local storage, and the DOM are browser APIs, so the C++ module
 reaches them through Emscripten's generated JavaScript bindings. The owner's `cipher.js`,
-`cipher-worker.js`, and `voice-cipher.js` modules remain hand-written JavaScript because the
-standard encoded-transform API runs in a browser worker.
+`cipher-worker.js`, `voice-cipher.js`, and `keys.js` modules remain hand-written JavaScript because
+the standard encoded-transform and Web Crypto APIs run in browser and worker contexts.
 
 The checked-in artifacts are built and reproducibility-checked in CI with Emscripten 6.0.5.
 
@@ -103,7 +104,8 @@ firewalls may still require a TURN relay. Add TURN credentials to `rtcConfigurat
 | **Invite** | Copy the room URL |
 | **Audio** | Select a microphone and push-to-talk mode |
 | **Volume** | Adjust an individual remote participant on their card |
-| **Encrypt (debug)** | Encrypt outgoing frames with an unshared key so peers hear static |
+| **Encryption** | Encrypt outgoing frames; only people holding your key can hear them |
+| **Keys** | Copy your key or paste another participant's listening key |
 
 A green pulse around a participant means they are speaking.
 
@@ -145,8 +147,8 @@ a worker, falling back to Chrome's older `createEncodedStreams`; browsers with n
 disabled. Wire format is `[opus TOC (1)][ciphertext+tag][iv (12)][magic (2)]`, about 12 kbps of
 overhead.
 
-Two details that are load-bearing, both in [public/voice-cipher.js](public/voice-cipher.js) and
-[public/app.js](public/app.js):
+Two details are load-bearing, in [public/voice-cipher.js](public/voice-cipher.js) and
+[`src/client.cpp`](src/client.cpp):
 
 - The one-byte Opus TOC header stays in the clear. Encrypt it too and the far-end decoder rejects
   frames outright, so listeners without the key get silence and decoder errors instead of static.

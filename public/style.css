@@ -15,7 +15,7 @@
   --terracotta: #ca7658;
   --terracotta-dark: #9c513b;
   --danger: #b84e46;
-  --scramble: #a66e22;
+  --encrypted: #a66e22;
   --shadow: rgba(105, 82, 58, .23);
   --deep-shadow: rgba(86, 64, 45, .18);
   --highlight: rgba(255, 255, 255, .7);
@@ -333,7 +333,7 @@ h1 {
 
 .peer.muted .avatar::after { opacity: 1; }
 
-.peer.scrambled .avatar::before {
+.peer.encrypted .avatar::before {
   content: "🔒";
   position: absolute;
   left: -6px;
@@ -352,7 +352,14 @@ h1 {
   font-size: 11px;
 }
 
-.peer.scrambled .avatar { border-color: var(--scramble); }
+.peer.encrypted .avatar { border-color: var(--encrypted); }
+
+.peer.encrypted.unlocked .avatar::before {
+  content: "🔓";
+  background: var(--mint);
+}
+
+.peer.encrypted.unlocked .avatar { border-color: var(--green); }
 
 .name {
   max-width: 100%;
@@ -481,7 +488,7 @@ h1 {
   left: 50%;
   bottom: calc(18px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
-  width: min(650px, calc(100% - 24px));
+  width: min(760px, calc(100% - 24px));
   min-height: 86px;
   padding: 10px;
   border: 1px solid rgba(118, 93, 67, .3);
@@ -585,6 +592,12 @@ h1 {
 .control.debug.on {
   border-style: solid;
   background: #d7a95c;
+}
+
+.control.key-control {
+  border-color: rgba(42, 93, 68, .35);
+  background: #d7e5d6;
+  color: var(--green-dark);
 }
 
 .ico { font-size: 14px; }
@@ -929,6 +942,70 @@ h1 {
   color: var(--dim);
   font-size: 11px;
 }
+
+.key-card {
+  width: min(600px, 100%);
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+}
+
+.key-help {
+  margin: -1px 0 8px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.keybox {
+  width: 100%;
+  min-height: 82px;
+  padding: 12px;
+  border: 1px solid rgba(119, 92, 65, .34);
+  border-radius: 16px 12px 17px 13px;
+  outline: 0;
+  resize: vertical;
+  background: #decdb8;
+  color: var(--ink);
+  box-shadow:
+    inset 4px 5px 8px rgba(111, 79, 48, .15),
+    inset -4px -4px 7px rgba(255, 250, 235, .44);
+  font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.keybox:focus {
+  border-color: var(--green);
+  outline: 2px solid rgba(53, 111, 83, .17);
+}
+
+.key-actions {
+  margin-top: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-print {
+  margin-left: auto;
+  color: var(--dim);
+  font: 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.key-print code {
+  color: var(--green-dark);
+  font-weight: 800;
+}
+
+.key-listen-label { margin-top: 22px; }
+
+.key-status {
+  min-height: 18px;
+  margin: 12px 1px -5px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.key-status.ok { color: var(--green-dark); }
+.key-status.bad { color: var(--danger); }
 
 .unblock {
   position: fixed;

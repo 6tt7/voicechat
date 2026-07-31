@@ -8,7 +8,7 @@
   "scripts": {
     "build": "npm run build:wasm",
     "build:wasm": "bash scripts/build-wasm.sh",
-    "check": "node --check server.js && node --check public/boot.js && node --check public/cipher.js && node --check public/cipher-worker.js && node --check public/voice-cipher.js && npm test",
+    "check": "node --check server.js && node --check public/boot.js && node --check public/cipher.js && node --check public/cipher-worker.js && node --check public/voice-cipher.js && node --check public/keys.js && npm test",
     "start": "node server.js",
     "test": "node --test"
   },
