@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: voicechat
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MAX_PEERS
+        value: "12"

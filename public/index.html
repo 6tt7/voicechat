@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>the channel</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>" />
+</head>
+<body>
+  <div class="glow"></div>
+
+  <header>
+    <div class="brand">
+      <span class="dot" id="statusDot"></span>
+      <h1>the channel</h1>
+    </div>
+    <p class="status" id="status">connecting…</p>
+  </header>
+
+  <main>
+    <ul class="grid" id="grid"></ul>
+    <p class="empty" id="empty">nobody else is here yet — send someone the link.</p>
+  </main>
+
+  <footer>
+    <button id="muteBtn" class="btn primary" title="Mute / unmute (M)">
+      <span class="ico" id="muteIco">🎙️</span><span id="muteLabel">mute</span>
+    </button>
+    <button id="editBtn" class="btn" title="Change your picture and name">
+      <span class="ico">🙂</span><span>you</span>
+    </button>
+    <button id="copyBtn" class="btn" title="Copy the room link">
+      <span class="ico">🔗</span><span id="copyLabel">copy link</span>
+    </button>
+  </footer>
+
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet-card">
+      <h2>your picture</h2>
+      <div class="editor">
+        <div class="preview" id="preview"></div>
+        <div class="editor-controls">
+          <input id="nameInput" maxlength="24" placeholder="name" autocomplete="off" />
+          <div class="row">
+            <button class="btn small" id="rerollBtn">🎲 shuffle</button>
+            <label class="btn small" for="fileInput">🖼️ upload</label>
+            <input type="file" id="fileInput" accept="image/*" hidden />
+          </div>
+          <p class="hint">no account, nothing saved on the server — this lives in your browser.</p>
+        </div>
+      </div>
+      <button class="btn primary wide" id="doneBtn">done</button>
+    </div>
+  </div>
+
+  <button class="unblock" id="unblock" hidden>tap to enable audio</button>
+
+  <div id="audio" aria-hidden="true"></div>
+  <script src="app.js" type="module"></script>
+</body>
+</html>
