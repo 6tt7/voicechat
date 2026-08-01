@@ -1,5 +1,5 @@
 // Attaches the audio cipher to senders and receivers. Each peer link has its
-// own AES-GCM key (derived by ECDH — see crypto-dh.js), so keys are stored per
+// own AES-GCM key (derived by ECDH in the C++/WASM client), so keys are stored per
 // peer id. Prefers the standard RTCRtpScriptTransform (worker), falling back to
 // Chrome's older createEncodedStreams (main thread).
 import { createCipherTransform } from './voice-cipher.js';

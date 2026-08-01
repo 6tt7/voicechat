@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#e8dcca" />
+  <meta name="theme-color" content="#171813" />
   <meta name="description" content="A tiny, account-free WebRTC voice room." />
   <title>the channel — voice room</title>
   <link rel="stylesheet" href="style.css" />
@@ -43,6 +43,7 @@
         </div>
       </div>
 
+      <ul class="admin-stage" id="adminStage" aria-label="Channel admins" hidden></ul>
       <ul class="grid" id="grid" aria-label="People in the channel"></ul>
 
       <div class="empty" id="empty">
@@ -71,15 +72,19 @@
       <span class="control-icon" aria-hidden="true">⌁</span>
       <span>Audio</span>
     </button>
-    <button id="scrambleBtn" class="control btn debug" title="Debug: encrypt your outgoing audio and let peers play the ciphertext">
+    <button id="encryptBtn" class="control encryption on" title="Per-link ECDH audio encryption">
       <span class="control-icon ico" aria-hidden="true">🔒</span>
-      <span id="scrambleLabel">encrypt (debug)</span>
+      <span id="encryptLabel">Encryption on</span>
+    </button>
+    <button id="consoleBtn" class="control" title="Open connection logs">
+      <span class="control-icon ico" aria-hidden="true">▤</span>
+      <span>Console</span>
+    </button>
+    <button id="adminBtn" class="control" title="Admin login">
+      <span class="control-icon ico" aria-hidden="true">◆</span>
+      <span id="adminBtnLabel">Admin</span>
     </button>
   </footer>
-
-  <p class="debug-note" id="debugNote" hidden>
-    your voice is encrypted with a key nobody has — everyone else hears static, and you can't hear it yourself
-  </p>
 
   <div class="sheet" id="profileSheet" hidden>
     <section class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
@@ -146,21 +151,123 @@
       </div>
       <div class="security-hero" aria-hidden="true">E2E</div>
       <p class="security-copy">
-        Every voice connection is encrypted directly between browsers with DTLS-SRTP. The server
-        relays connection setup messages, but it never receives an audio stream or the encryption
-        keys.
+        Every connection uses DTLS-SRTP plus a fresh per-peer ECDH P-256 key. Audio frames are
+        protected with AES-GCM, and the server only relays public keys it cannot use to decrypt them.
       </p>
       <div class="security-detail">
         <strong>Verify who you reached</strong>
         <p>
-          Once connected, each person’s card shows a safety code derived from both WebRTC
-          certificates. Compare it with them using another trusted channel. Matching codes rule out
-          a signaling-layer interception.
+          Each person’s card shows a fingerprint derived from both ephemeral public keys. Compare
+          it through another trusted channel. New links use new keys for forward secrecy.
         </p>
       </div>
       <button class="wide-action" id="securityDoneBtn">Got it</button>
     </section>
   </div>
+
+  <div class="sheet" id="consoleSheet" hidden>
+    <section class="sheet-card console-card" role="dialog" aria-modal="true" aria-labelledby="consoleTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="dialog-kicker">runtime</p>
+          <h2 id="consoleTitle">Connection console</h2>
+        </div>
+        <label class="theme-label" for="themeSelect">Theme
+          <select id="themeSelect">
+            <option value="dark">dark clay</option>
+            <option value="light">light clay</option>
+            <option value="midnight">midnight</option>
+          </select>
+        </label>
+      </div>
+      <div class="chips" id="logChips">
+        <button class="chip on" id="chip-system">system</button>
+        <button class="chip on" id="chip-signal">signaling</button>
+        <button class="chip on" id="chip-webrtc">webrtc</button>
+        <button class="chip on" id="chip-dh">key exchange</button>
+        <button class="chip on" id="chip-media">media</button>
+        <button class="chip on" id="chip-admin">admin</button>
+      </div>
+      <div class="logbox" id="logList"></div>
+      <div class="dialog-actions">
+        <button class="pill-btn" id="logClearBtn">Clear</button>
+        <button class="wide-action compact" id="consoleDoneBtn">Done</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="sheet" id="adminLoginSheet" hidden>
+    <section class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle">
+      <div class="sheet-head">
+        <div>
+          <p class="dialog-kicker">restricted</p>
+          <h2 id="adminLoginTitle">Admin login</h2>
+        </div>
+        <button class="close-btn" id="adminLoginCancelBtn" aria-label="Cancel admin login">×</button>
+      </div>
+      <label class="field-label" for="adminUser">Username</label>
+      <input class="clay-input" id="adminUser" autocomplete="username" />
+      <label class="field-label spaced-field" for="adminPass">Password</label>
+      <input class="clay-input" id="adminPass" type="password" autocomplete="current-password" />
+      <p class="key-status" id="adminLoginMsg" role="status"></p>
+      <button class="wide-action" id="adminLoginBtn">Sign in</button>
+    </section>
+  </div>
+
+  <aside class="admin-panel" id="adminPanel" hidden>
+    <div class="admin-head">
+      <span>Admin · <b id="adminWho"></b></span>
+      <button class="close-btn mini" id="adminPanelCloseBtn" aria-label="Close admin panel">×</button>
+    </div>
+    <p class="hint">Select a participant to moderate them.</p>
+    <div class="admin-announce">
+      <input class="clay-input" id="announceInput" maxlength="200" placeholder="Announcement" />
+      <button class="pill-btn" id="announceBtn">Send</button>
+    </div>
+    <div class="admin-tools">
+      <button class="pill-btn" id="confettiBtn">Confetti</button>
+      <button class="pill-btn" id="lockBtn">Lock room</button>
+      <button class="pill-btn" id="spotlightClearBtn">Clear spotlight</button>
+    </div>
+  </aside>
+
+  <div class="sheet" id="popoverSheet" hidden>
+    <section class="sheet-card pop-card" role="dialog" aria-modal="true" aria-labelledby="popTitle">
+      <div class="sheet-head compact-head">
+        <div>
+          <p class="dialog-kicker">participant</p>
+          <h2 id="popTitle">User</h2>
+        </div>
+        <button class="close-btn" id="popCloseBtn" aria-label="Close participant controls">×</button>
+      </div>
+      <p class="pop-fpr" id="popFpr"></p>
+      <label class="volume-field" id="popVolumeWrap" for="popVolume">How loud you hear them
+        <input id="popVolume" type="range" min="0" max="100" value="100" />
+      </label>
+      <div class="admin-actions" id="popAdmin" hidden>
+        <button class="pill-btn" id="action-warn">Warn</button>
+        <button class="pill-btn" id="action-mute">Mute</button>
+        <button class="pill-btn" id="action-rename">Rename</button>
+        <button class="pill-btn" id="action-reset-avatar">Reset picture</button>
+        <button class="pill-btn" id="action-spotlight">Spotlight</button>
+        <button class="pill-btn danger" id="action-kick">Kick</button>
+        <button class="pill-btn danger" id="action-ban">Ban IP</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="sheet" id="warnSheet" hidden>
+    <section class="sheet-card" role="alertdialog" aria-modal="true" aria-labelledby="warnTitle">
+      <p class="dialog-kicker">moderation</p>
+      <h2 id="warnTitle">Warning from <span id="warnBy"></span></h2>
+      <p class="warn-body" id="warnText"></p>
+      <button class="wide-action" id="warnCloseBtn">Understood</button>
+    </section>
+  </div>
+
+  <p class="announce" id="announce" hidden></p>
+  <div class="toast" id="toast" hidden></div>
+  <div class="confetti" id="confetti" aria-hidden="true"></div>
 
   <button class="unblock" id="unblock" hidden>Tap to enable audio</button>
   <div id="audio" aria-hidden="true"></div>

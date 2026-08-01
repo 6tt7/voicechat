@@ -1,9 +1,12 @@
 import createVoiceChat from './voicechat-runtime.js';
 import {
   cipherSupported,
+  forgetPeer,
+  installReceiverCipher,
   installSenderCipher,
   pcCipherOptions,
-  setCipherEnabled,
+  setEncryptionEnabled,
+  setPeerKey,
 } from './cipher.js';
 
 const status = document.getElementById('status');
@@ -12,9 +15,12 @@ const statusDot = document.getElementById('statusDot');
 try {
   globalThis.voiceCipher = Object.freeze({
     cipherSupported,
+    forgetPeer,
+    installReceiverCipher,
     installSenderCipher,
     pcCipherOptions,
-    setCipherEnabled,
+    setEncryptionEnabled,
+    setPeerKey,
   });
   await createVoiceChat();
 } catch (error) {

@@ -1,7 +1,7 @@
 // Frame-level cipher, shared by the worker and the main-thread fallback.
 //
 // Audio frames are encrypted with AES-GCM under a per-link key that ECDH
-// (Diffie-Hellman) derived — see crypto-dh.js. Both ends of a link derive the
+// (Diffie-Hellman) derived by the C++/WASM client. Both ends of a link derive the
 // same key, so each decrypts the other; anyone without it (the server, a
 // third party) feeds ciphertext into their Opus decoder and hears static.
 //
