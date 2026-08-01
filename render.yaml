@@ -3,6 +3,8 @@ services:
     name: voicechat
     runtime: node
     plan: free
+    branch: main
+    autoDeployTrigger: commit
     buildCommand: npm ci
     startCommand: npm start
     envVars:
